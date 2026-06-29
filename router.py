@@ -776,125 +776,68 @@ def smart_route_model(
             elif role == "system" and not system_prompt:
                 system_prompt = content
 
-    def _resolve_mapping(agent: str) -> Tuple[str, str, str] | None:
-        """
-        Проверяет конфиг для распознанного агента.
-        Если указана конкретная модель (не 'auto') — возвращает (model, role, reason).
-        Если 'auto' — возвращает None (падаем дальше).
-        """
+    mechanism = ""
+    last_identified_agent = ""
+
+    def _resolve_or_fallback(agent: str, mech: str) -> tuple | None:
         nonlocal last_identified_agent
         last_identified_agent = agent
         mapping = state.config.get("agent_to_worker_mapping", {})
         model = mapping.get(agent)
         if model and model != "auto":
             role = get_role_for_agent(agent) or ""
-            return model, role, f"{mechanism}: {agent}"
+            return (model, role, f"{mech}: {agent}")
+        role = get_role_for_agent(agent)
+        if role:
+            model = state.config.get("role_models", {}).get(role) or get_role_default_model(role)
+            if model:
+                return (model, role, f"{mech}: {agent} (auto -> {role} default)")
         return None
 
-    mechanism = ""
-    last_identified_agent = ""
-
-    # 2. System prompt fingerprint — определяем агента по содержимому system prompt
+    # 2. System prompt fingerprint
     fingerprint = fingerprint_system_prompt(system_prompt)
     if fingerprint:
         agent, score = fingerprint
-        mechanism = f"Fingerprint (score={score})"
-        result = _resolve_mapping(agent)
+        result = _resolve_or_fallback(agent, f"Fingerprint (score={score})")
         if result:
             return result
-            # Agent распознан, но mapping = "auto" или отсутствует
-            # -> берём default_model роли агента из role_models
-            role = get_role_for_agent(agent)
-            if role:
-                model = state.config.get("role_models", {}).get(role) or get_role_default_model(role)
-                if model:
-                    last_identified_agent = agent
-                    return model, role, f"{mechanism} (auto -> {role} default)"
 
-    # 3. Проверка явного тега [AGENT:name] в последнем user-сообщении
-    # ВАЖНО: выполняется ДО sub-agent heuristic, чтобы [AGENT:coordinator] работал
+    # 3. Agent tag [AGENT:name] — ДО sub-agent heuristic!
     if last_user_msg:
         tag_match = AGENT_TAG_PATTERN.search(last_user_msg)
         if tag_match:
             agent = tag_match.group(1).lower()
-            mechanism = f"Agent tag: {agent}"
-            result = _resolve_mapping(agent)
+            result = _resolve_or_fallback(agent, f"Agent tag: {agent}")
             if result:
                 return result
-            # Agent распознан по тегу, но mapping = "auto" или отсутствует
-            # -> берём default_model роли агента из role_models
-            role = get_role_for_agent(agent)
-            if role:
-                model = state.config.get("role_models", {}).get(role) or get_role_default_model(role)
-                if model:
-                    last_identified_agent = agent
-                    return model, role, f"Agent tag: {agent} (auto -> {role} default)"
 
     # 2.5 Sub-agent detection (Quick Win)
-    # Если system prompt < порога Coordinator, нет fingerprint и нет agent tag
-    # → это sub-agent → worker_default (дешёвая модель)
     if system_prompt and len(system_prompt) < COORDINATOR_PROMPT_THRESHOLD:
         fp = fingerprint_system_prompt(system_prompt)
         if not fp:
-            default = state.config.get("default_worker") or get_role_default_model(
-                "worker_default"
-            )
+            default = state.config.get("default_worker") or get_role_default_model("worker_default")
             return default, "worker_default", "Sub-agent (default_worker)"
-    if last_user_msg:
-        tag_match = AGENT_TAG_PATTERN.search(last_user_msg)
-        if tag_match:
-            agent = tag_match.group(1).lower()
-            mechanism = f"Agent tag: {agent}"
-            result = _resolve_mapping(agent)
-            if result:
-                return result
-
-    # 4. Coordinator определяется ТОЛЬКО через fingerprinting (steps 2, 5)
-    # Size-based fallback удалён (Step 1.3): длинный промпт без fingerprint
-    # → default_worker, а не coordinator
 
     if not last_user_msg:
         return requested_model, "", "Пустой user prompt"
 
-    # 5. User message fingerprint — анализ ВСЕХ user-сообщений
+    # 5. User message fingerprint
     scope_fingerprint = fingerprint_user_messages(messages)
     if scope_fingerprint:
         agent, score = scope_fingerprint
-        mechanism = f"UserMsg fingerprint (score={score})"
-        result = _resolve_mapping(agent)
+        result = _resolve_or_fallback(agent, f"UserMsg fingerprint (score={score})")
         if result:
             return result
-            # Agent распознан, но mapping = "auto" или отсутствует
-            # -> берём default_model роли агента из role_models
-            role = get_role_for_agent(agent)
-            if role:
-                model = state.config.get("role_models", {}).get(role) or get_role_default_model(role)
-                if model:
-                    last_identified_agent = agent
-                    return model, role, f"{mechanism} (auto -> {role} default)"
 
-    # 6. Проверка явного spawn_agent() в сообщении пользователя
+    # 6. spawn_agent pattern
     spawn_match = SPAWN_AGENT_PATTERN.search(last_user_msg)
     if spawn_match:
         agent = spawn_match.group(1).lower()
-        mechanism = f"spawn_agent: {agent}"
-        result = _resolve_mapping(agent)
+        result = _resolve_or_fallback(agent, f"spawn_agent: {agent}")
         if result:
             return result
-            # Agent распознан, но mapping = "auto" или отсутствует
-            # -> берём default_model роли агента из role_models
-            role = get_role_for_agent(agent)
-            if role:
-                model = state.config.get("role_models", {}).get(role) or get_role_default_model(role)
-                if model:
-                    last_identified_agent = agent
-                    return model, role, f"{mechanism} (auto -> {role} default)"
         if state.config.get("enable_auto_routing"):
-            return (
-                state.config["default_worker"],
-                "worker_default",
-                f"spawn_agent (default fallback)",
-            )
+            return (state.config["default_worker"], "worker_default", "spawn_agent (default fallback)")
 
     # 7. Эвристический анализ по паттернам кода (если включено)
     if state.config.get("enable_auto_routing"):

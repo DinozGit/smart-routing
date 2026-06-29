@@ -1,6 +1,6 @@
 {
   "role_models": {
-    "coordinator": "deepseek/deepseek-v4-pro",
+    "coordinator": "z-ai/glm-5.2",
     "worker_default": "deepseek/deepseek-v4-flash",
     "worker_img": "qwen/qwen3-coder-next"
   },
