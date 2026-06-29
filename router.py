@@ -1,17 +1,36 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import os
 import re
 import time
+from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import httpx
 import uvicorn
+import yaml
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+
+# ============================================================
+# 🌍 ЗАГРУЗКА .env (API-ключи)
+# ============================================================
+load_dotenv()
+
+# ============================================================
+# 📦 ЗАГРУЗКА КОНФИГУРАЦИИ
+# ============================================================
+CONFIG_FILE = Path(__file__).parent / "config.yaml"
+ADMIN_HTML_FILE = Path(__file__).parent / "admin.html"
+
+with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+    cfg = yaml.safe_load(f)
 
 # ============================================================
 # 🔧 ИНИЦИАЛИЗАЦИЯ И НАСТРОЙКА ЛОГИРОВАНИЯ
@@ -23,59 +42,57 @@ logging.basicConfig(
 )
 logger = logging.getLogger("SmartRouter")
 
-# Загружаем переменные окружения из .env
-load_dotenv()
-ROUTERAI_KEY = os.getenv("ROUTERAI_KEY", "")
+# ============================================================
+# 📝 КОЛЬЦЕВОЙ БУФЕР ЛОГОВ (для админки)
+# ============================================================
+MAX_LOG_ENTRIES = 500
+log_buffer = deque(maxlen=MAX_LOG_ENTRIES)
 
-if not ROUTERAI_KEY:
-    logger.critical(
-        "ROUTERAI_KEY не найден! Создай файл .env: ROUTERAI_KEY=sk-ra-ТВОЙ_КЛЮЧ"
-    )
-    exit(1)
+
+class RingBufferHandler(logging.Handler):
+    """Перехватывает логи в кольцевой буфер in-memory."""
+
+    def emit(self, record: logging.LogRecord):
+        log_entry = {
+            "time": datetime.fromtimestamp(record.created).strftime("%H:%M:%S"),
+            "level": record.levelname,
+            "message": record.getMessage(),
+            "logger": record.name,
+        }
+        log_buffer.append(log_entry)
+
+
+# Подключаем handler к корневому логгеру
+ring_handler = RingBufferHandler(level=logging.INFO)
+logging.getLogger().addHandler(ring_handler)
 
 # ============================================================
-# 🚫 КОНСТАНТЫ И КОНФИГУРАЦИИ
+# 🚫 КОНСТАНТЫ ИЗ КОНФИГА
 # ============================================================
-BLACKLIST = {
-    "gpt-3.5",
-    "gpt-3.5-turbo",
-    "claude-2",
-    "claude-2.0",
-    "claude-2.1",
-    "gemini-pro",
-    "gpt-4-turbo-preview",
-    "gpt-4-32k",
-    "text-davinci",
-}
+BLACKLIST = set(cfg.get("api_blacklist", []))
 
-PRICES = {
-    "deepseek/deepseek-v4-pro": {
-        "input": 0.50,
-        "output": 1.50,
-        "provider": "RouterAI",
-        "emoji": "🧠",
-        "role": "Coordinator",
-    },
-    "deepseek/deepseek-v4-flash": {
-        "input": 0.05,
-        "output": 0.20,
-        "provider": "RouterAI",
-        "emoji": "⚡",
-        "role": "Worker",
-    },
-    "qwen/qwen3-coder-next": {
-        "input": 0.11,
-        "output": 0.84,
-        "provider": "RouterAI",
-        "emoji": "💻",
-        "role": "Frontend",
-    },
-}
+# Строим PRICES из config.yaml
+PRICES = {}
+for model_name, model_cfg in cfg.get("models", {}).items():
+    PRICES[model_name] = {
+        "input": model_cfg["input_price"],
+        "output": model_cfg["output_price"],
+        "provider": model_cfg.get("provider", "Unknown"),
+        "emoji": model_cfg.get("emoji", "🤖"),
+        "role": model_cfg.get("role", "Worker"),
+    }
+
+# Пороги из конфига
+ROUTING_CFG = cfg.get("routing", {})
+MIN_FINGERPRINT_SCORE = ROUTING_CFG.get("min_fingerprint_score", 10)
+MIN_SCOPE_SCORE = ROUTING_CFG.get("min_scope_score", 8)
+COORDINATOR_PROMPT_THRESHOLD = ROUTING_CFG.get("coordinator_prompt_threshold", 3000)
+HEURISTIC_THRESHOLD = ROUTING_CFG.get("heuristic_threshold", 2)
+
+# Логи
+MAX_LOG_ENTRIES = cfg.get("logging", {}).get("max_entries", 500)
 
 
-# ============================================================
-# 📋 СОСТОЯНИЕ (STATE)
-# ============================================================
 class RouterState:
     def __init__(self):
         self.config_file = Path(__file__).parent / "routing.json"
@@ -100,8 +117,30 @@ class RouterState:
         }
         self.quota = {"last_check": 0, "is_ok": True}
         self.config_lock = asyncio.Lock()  # Защита от конкурентной записи файла
+        # Провайдеры в runtime (из config.yaml)
+        self.providers = cfg.get("providers", {})
+        self._active_provider = self._determine_active_provider()
 
         self._load_config()
+
+    def _determine_active_provider(self) -> str:
+        """Определяет дефолтный провайдер из конфига."""
+        for p_name, p_cfg in self.providers.items():
+            if p_cfg.get("default", False):
+                return p_name
+        # Если ничего не default — первый
+        first = next(iter(self.providers.keys()), "routerai")
+        return first
+
+    def get_active_provider_url(self) -> str:
+        """Возвращает base_url активного провайдера."""
+        provider = self.providers.get(self._active_provider, {})
+        return provider.get("base_url", "https://routerai.ru/api/v1/chat/completions")
+
+    def get_active_provider_key_env(self) -> str:
+        """Возвращает имя env-переменной с API-ключом."""
+        provider = self.providers.get(self._active_provider, {})
+        return provider.get("api_key_env", "ROUTERAI_KEY")
 
     def _load_config(self):
         if self.config_file.exists():
@@ -115,10 +154,22 @@ class RouterState:
     async def save_config(self, new_config: dict):
         async with self.config_lock:
             self.config.update(new_config)
-            # Выполняем запись файла в отдельном потоке, чтобы не блокировать Event Loop
             await asyncio.to_thread(
                 self._sync_write_config, self.config_file, self.config
             )
+
+    async def save_config_yaml(self):
+        """Сохраняет config.yaml с обновлёнными провайдерами."""
+        cfg_copy = dict(cfg)  # загруженный при старте
+        cfg_copy["providers"] = self.providers
+        async with self.config_lock:
+            await asyncio.to_thread(
+                lambda: Path(CONFIG_FILE).write_text(
+                    yaml.dump(cfg_copy, default_flow_style=False, allow_unicode=True),
+                    encoding="utf-8",
+                )
+            )
+        logger.info(f"✅ config.yaml обновлён с провайдерами")
 
     @staticmethod
     def _sync_write_config(path: Path, data: dict):
@@ -133,7 +184,90 @@ state = RouterState()
 # ============================================================
 SPAWN_AGENT_PATTERN = re.compile(r'spawn_agent\s*\(\s*["\'](\w+)["\']', re.IGNORECASE)
 
-# Компилируем паттерны один раз при старте
+# Паттерн для явного тега агента в user-сообщении: [AGENT:name]
+AGENT_TAG_PATTERN = re.compile(r"\[AGENT:(\w+)\]", re.IGNORECASE)
+
+# Fingerprint-паттерны для определения агента по system prompt.
+# Каждый агент CalorIt имеет уникальные маркеры (из AGENTS.md):
+# название роли, write scope, ключевые технологии.
+# Формат: {agent_name: [(regex, weight), ...]}
+AGENT_FINGERPRINTS = {
+    "database": [
+        (re.compile(r"CalorIt\s+Database", re.IGNORECASE), 10),
+        (re.compile(r"SQLAlchemy\s+models", re.IGNORECASE), 8),
+        (re.compile(r"alembic.*migration", re.IGNORECASE), 8),
+        (re.compile(r"CRUD\s+operations", re.IGNORECASE), 6),
+        (re.compile(r"database/\*\.py", re.IGNORECASE), 5),
+    ],
+    "tests": [
+        (re.compile(r"CalorIt\s+Tests", re.IGNORECASE), 10),
+        (re.compile(r"Pytest\s+unit.*integration", re.IGNORECASE), 8),
+        (re.compile(r"Write\s+scope.*tests/", re.IGNORECASE), 8),
+        (re.compile(r"\bpytest\b.*\btests?/\b", re.IGNORECASE), 6),
+    ],
+    "bot": [
+        (re.compile(r"CalorIt\s+Telegram\s+Bot", re.IGNORECASE), 10),
+        (re.compile(r"aiogram\s+handlers", re.IGNORECASE), 8),
+        (re.compile(r"FSM\s+states", re.IGNORECASE), 8),
+        (re.compile(r"inline\s+keyboards", re.IGNORECASE), 6),
+        (re.compile(r"handlers/\*\.py", re.IGNORECASE), 5),
+    ],
+    "devops": [
+        (re.compile(r"CalorIt\s+DevOps", re.IGNORECASE), 10),
+        (re.compile(r"Docker.*CI/CD.*Nginx", re.IGNORECASE), 8),
+        (re.compile(r"docker-compose.*\.yml", re.IGNORECASE), 8),
+        (re.compile(r"SSL.*deployment", re.IGNORECASE), 6),
+    ],
+    "api": [
+        (re.compile(r"CalorIt\s+API\s+Layer", re.IGNORECASE), 10),
+        (re.compile(r"FastAPI\s+endpoints", re.IGNORECASE), 8),
+        (re.compile(r"Pydantic\s+schemas", re.IGNORECASE), 8),
+        (re.compile(r"JWT\s+middleware", re.IGNORECASE), 6),
+        (re.compile(r"api/\*\.py", re.IGNORECASE), 5),
+    ],
+    "services": [
+        (re.compile(r"CalorIt\s+Services", re.IGNORECASE), 10),
+        (re.compile(r"AI\s+service.*OpenRouter", re.IGNORECASE), 8),
+        (re.compile(r"cache\s+merge", re.IGNORECASE), 6),
+        (
+            re.compile(
+                r"nutrition_service|reminder_service|APScheduler", re.IGNORECASE
+            ),
+            8,
+        ),
+        (re.compile(r"services/\*\.py", re.IGNORECASE), 5),
+    ],
+    "frontend": [
+        (re.compile(r"CalorIt\s+Frontend", re.IGNORECASE), 10),
+        (re.compile(r"Next\.?js.*dashboard", re.IGNORECASE), 8),
+        (re.compile(r"Telegram\s+Login\s+Widget", re.IGNORECASE), 6),
+        (re.compile(r"frontend/\*\*/\*", re.IGNORECASE), 5),
+        (re.compile(r"\bReact\b.*components", re.IGNORECASE), 6),
+    ],
+    "mobile": [
+        (re.compile(r"CalorIt\s+Mobile", re.IGNORECASE), 10),
+        (re.compile(r"Flutter.*Dart", re.IGNORECASE), 8),
+        (re.compile(r"calorit_app", re.IGNORECASE), 8),
+        (re.compile(r"mobile/\*\*/\*", re.IGNORECASE), 5),
+        (re.compile(r"Android.*iOS|push.уведомлени", re.IGNORECASE), 6),
+    ],
+    "design": [
+        (re.compile(r"CalorIt\s+Design", re.IGNORECASE), 10),
+        (re.compile(r"design\s+tokens", re.IGNORECASE), 8),
+        (re.compile(r"Material\s*3", re.IGNORECASE), 6),
+        (re.compile(r"Figma.*экспорт", re.IGNORECASE), 6),
+        (re.compile(r"design/\*\*/\*", re.IGNORECASE), 5),
+    ],
+    "coordinator": [
+        (re.compile(r"Coordinator.*главный\s+агент", re.IGNORECASE), 10),
+        (re.compile(r"SYSTEM_CONTEXT\.md", re.IGNORECASE), 8),
+        (re.compile(r"декомпозици.*фаз", re.IGNORECASE), 8),
+        (re.compile(r"spawn_agent.*распределение", re.IGNORECASE), 6),
+        (re.compile(r"Деплой\s+на\s+VPS\s+через\s+SSH", re.IGNORECASE), 6),
+    ],
+}
+
+# Компилируем эвристические паттерны один раз при старте
 COMPILED_PATTERNS = {
     "flash": [
         re.compile(p, re.IGNORECASE)
@@ -201,7 +335,157 @@ def log_usage(model: str, input_tokens: int, output_tokens: int):
 # ============================================================
 # 🧠 УМНАЯ МАРШРУТИЗАЦИЯ
 # ============================================================
+def fingerprint_system_prompt(system_prompt: str) -> Tuple[str, int] | None:
+    """
+    Определяет роль агента CalorIt по содержимому system prompt.
+    Возвращает (agent_name, score) или None, если агент не определён.
+    """
+    if not system_prompt:
+        return None
+
+    best_agent = None
+    best_score = 0
+
+    for agent, patterns in AGENT_FINGERPRINTS.items():
+        score = 0
+        for pattern, weight in patterns:
+            if pattern.search(system_prompt):
+                score += weight
+        if score > best_score:
+            best_score = score
+            best_agent = agent
+
+    if best_score >= MIN_FINGERPRINT_SCORE:
+        return (best_agent, best_score)
+    return None
+
+
+# ============================================================
+# 🔍 USER MESSAGE FINGERPRINTING
+# ============================================================
+# Паттерны для определения агента по содержимому user-сообщений.
+# Sub-agents Zed не получают AGENTS.md в system prompt, но получают
+# задачи от Coordinator с write scope, файлами и responsibilities.
+AGENT_SCOPE_PATTERNS = {
+    "database": [
+        (re.compile(r"database/\*\.py", re.IGNORECASE), 12),
+        (re.compile(r"SQLAlchemy\s+models", re.IGNORECASE), 10),
+        (re.compile(r"alembic/versions?/\*\.py", re.IGNORECASE), 10),
+        (re.compile(r"CRUD\s+operations?", re.IGNORECASE), 8),
+        (re.compile(r"alembic\.ini", re.IGNORECASE), 6),
+        (re.compile(r"migrations", re.IGNORECASE), 5),
+    ],
+    "tests": [
+        (re.compile(r"tests?/\*\.py", re.IGNORECASE), 12),
+        (re.compile(r"Pytest\s+unit.*integration", re.IGNORECASE), 10),
+        (re.compile(r"Write\s+scope.*tests?/", re.IGNORECASE), 10),
+        (re.compile(r"\bpytest\b", re.IGNORECASE), 6),
+        (re.compile(r"unit.*integration.*tests?", re.IGNORECASE), 6),
+    ],
+    "bot": [
+        (re.compile(r"handlers/\*\.py", re.IGNORECASE), 12),
+        (re.compile(r"aiogram\s+handlers", re.IGNORECASE), 10),
+        (re.compile(r"FSM\s+states", re.IGNORECASE), 8),
+        (re.compile(r"inline\s+keyboards", re.IGNORECASE), 8),
+        (re.compile(r"keyboards?\.py", re.IGNORECASE), 7),
+    ],
+    "devops": [
+        (re.compile(r"Dockerfile", re.IGNORECASE), 12),
+        (re.compile(r"docker-compose.*\.yml", re.IGNORECASE), 10),
+        (re.compile(r"nginx.*\.conf", re.IGNORECASE), 10),
+        (re.compile(r"\.github/workflows?", re.IGNORECASE), 10),
+        (re.compile(r"CI/CD.*Nginx.*SSL", re.IGNORECASE), 8),
+    ],
+    "api": [
+        (re.compile(r"api/\*\.py", re.IGNORECASE), 12),
+        (re.compile(r"schemas?\.py", re.IGNORECASE), 10),
+        (re.compile(r"middleware\.py", re.IGNORECASE), 8),
+        (re.compile(r"FastAPI\s+endpoints", re.IGNORECASE), 10),
+        (re.compile(r"Pydantic\s+schemas", re.IGNORECASE), 8),
+        (re.compile(r"JWT\s+middleware", re.IGNORECASE), 6),
+    ],
+    "services": [
+        (re.compile(r"services?/\*\.py", re.IGNORECASE), 12),
+        (re.compile(r"nutrition_service|reminder_service", re.IGNORECASE), 10),
+        (re.compile(r"APScheduler", re.IGNORECASE), 8),
+        (re.compile(r"AI\s+service.*OpenRouter", re.IGNORECASE), 8),
+        (re.compile(r"cache\s+merge", re.IGNORECASE), 6),
+    ],
+    "frontend": [
+        (re.compile(r"frontend/\*\*/\*", re.IGNORECASE), 12),
+        (re.compile(r"Next\.?js", re.IGNORECASE), 10),
+        (re.compile(r"\bReact\b", re.IGNORECASE), 8),
+        (re.compile(r"Telegram\s+Login\s+Widget", re.IGNORECASE), 6),
+        (re.compile(r"\.tsx\b|\.jsx\b", re.IGNORECASE), 6),
+    ],
+    "mobile": [
+        (re.compile(r"mobile/\*\*/\*", re.IGNORECASE), 12),
+        (re.compile(r"Flutter.*Dart", re.IGNORECASE), 10),
+        (re.compile(r"calorit_app", re.IGNORECASE), 8),
+        (re.compile(r"MOBILE_APP_PLAN\.md", re.IGNORECASE), 6),
+    ],
+    "design": [
+        (re.compile(r"design/\*\*/\*", re.IGNORECASE), 12),
+        (re.compile(r"design\s+tokens", re.IGNORECASE), 10),
+        (re.compile(r"Material\s*3", re.IGNORECASE), 8),
+        (re.compile(r"Figma", re.IGNORECASE), 6),
+        (re.compile(r"design/context", re.IGNORECASE), 6),
+    ],
+    "coordinator": [
+        (re.compile(r"SYSTEM_CONTEXT\.md", re.IGNORECASE), 12),
+        (re.compile(r"Coordinator.*главный\s+агент", re.IGNORECASE), 10),
+        (re.compile(r"декомпозици.*фаз", re.IGNORECASE), 8),
+        (re.compile(r"Деплой\s+на\s+VPS\s+через\s+SSH", re.IGNORECASE), 6),
+    ],
+}
+
+
+def fingerprint_user_messages(messages: list) -> Tuple[str, int] | None:
+    """
+    Определяет роль агента CalorIt по содержимому ВСЕХ user-сообщений.
+    Решает проблему sub-agents в Zed, которые не получают AGENTS.md
+    в свой system prompt, но получают задачи с write scope и файлами.
+    Возвращает (agent_name, score) или None, если агент не определён.
+    """
+    # Собираем весь текст из user-сообщений
+    all_user_content = ""
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            all_user_content += content + "\n"
+        elif isinstance(content, list):
+            # content может быть массивом parts
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text", "")
+                    if text:
+                        all_user_content += text + "\n"
+
+    if not all_user_content.strip():
+        return None
+
+    best_agent = None
+    best_score = 0
+
+    for agent, patterns in AGENT_SCOPE_PATTERNS.items():
+        score = 0
+        for pattern, weight in patterns:
+            if pattern.search(all_user_content):
+                score += weight
+        if score > best_score:
+            best_score = score
+            best_agent = agent
+
+    if best_score >= MIN_SCOPE_SCORE:
+        logger.info(f"🔍 UserMsg fingerprint: {best_agent} (score={best_score})")
+        return (best_agent, best_score)
+    return None
+
+
 def smart_route_model(requested_model: str, body: Dict[str, Any]) -> Tuple[str, str]:
+    # 1. Явная модель — если уже содержит flash или qwen, не трогаем
     if any(m in requested_model.lower() for m in ["flash", "qwen"]):
         return requested_model, "Без изменений (уже дешевая)"
 
@@ -222,24 +506,83 @@ def smart_route_model(requested_model: str, body: Dict[str, Any]) -> Tuple[str, 
             elif role == "system" and not system_prompt:
                 system_prompt = content
 
-    # Проверка на Coordinator
-    if len(system_prompt) > 3000:
-        return requested_model, "Coordinator (Большой system prompt)"
+    def _resolve_mapping(agent: str) -> Tuple[str, str] | None:
+        """
+        Проверяет конфиг для распознанного агента.
+        Если указана конкретная модель (не 'auto') — возвращает её.
+        Если 'auto' или нет в mapping — возвращает None.
+        """
+        nonlocal last_identified_agent
+        last_identified_agent = agent
+        mapping = state.config.get("agent_to_worker_mapping", {})
+        model = mapping.get(agent)
+        if model and model != "auto":
+            return model, f"{mechanism}: {agent}"
+        return None
+
+    mechanism = ""
+    last_identified_agent = ""
+
+    # 2. System prompt fingerprint — определяем агента по содержимому system prompt
+    fingerprint = fingerprint_system_prompt(system_prompt)
+    if fingerprint:
+        agent, score = fingerprint
+        mechanism = f"Fingerprint (score={score})"
+        result = _resolve_mapping(agent)
+        if result:
+            return result
+        # если 'auto' — падаем дальше
+
+    # 2.5 Sub-agent detection (Quick Win)
+    # Если system prompt < порога Coordinator и fingerprint не нашёл CalorIt-агента
+    # → это sub-agent (не Coordinator) → default_worker (дешёвая модель)
+    if system_prompt and len(system_prompt) < COORDINATOR_PROMPT_THRESHOLD:
+        fp = fingerprint_system_prompt(system_prompt)
+        if not fp:
+            default = state.config.get("default_worker", "deepseek/deepseek-v4-flash")
+            return default, "Sub-agent (default_worker)"
+
+    # 3. Проверка явного тега [AGENT:name] в последнем user-сообщении
+    if last_user_msg:
+        tag_match = AGENT_TAG_PATTERN.search(last_user_msg)
+        if tag_match:
+            agent = tag_match.group(1).lower()
+            mechanism = f"Agent tag: {agent}"
+            result = _resolve_mapping(agent)
+            if result:
+                return result
+
+    # 4. Проверка на Coordinator по размеру system prompt (fallback)
+    if len(system_prompt) > COORDINATOR_PROMPT_THRESHOLD:
+        mechanism = "Coordinator (Большой system prompt)"
+        result = _resolve_mapping("coordinator")
+        if result:
+            return result
 
     if not last_user_msg:
         return requested_model, "Пустой user prompt"
 
-    # 1. Проверка явного spawn_agent
+    # 5. User message fingerprint — анализ ВСЕХ user-сообщений
+    scope_fingerprint = fingerprint_user_messages(messages)
+    if scope_fingerprint:
+        agent, score = scope_fingerprint
+        mechanism = f"UserMsg fingerprint (score={score})"
+        result = _resolve_mapping(agent)
+        if result:
+            return result
+
+    # 6. Проверка явного spawn_agent() в сообщении пользователя
     spawn_match = SPAWN_AGENT_PATTERN.search(last_user_msg)
     if spawn_match:
         agent = spawn_match.group(1).lower()
-        mapping = state.config.get("agent_to_worker_mapping", {})
-        if agent in mapping:
-            return mapping[agent], f"spawn_agent: {agent}"
+        mechanism = f"spawn_agent: {agent}"
+        result = _resolve_mapping(agent)
+        if result:
+            return result
         if state.config.get("enable_auto_routing"):
             return state.config["default_worker"], f"spawn_agent (default fallback)"
 
-    # 2. Эвристический анализ (если включено)
+    # 7. Эвристический анализ по паттернам кода (если включено)
     if state.config.get("enable_auto_routing"):
         scores = {"flash": 0, "qwen": 0}
         for category, patterns in COMPILED_PATTERNS.items():
@@ -247,17 +590,27 @@ def smart_route_model(requested_model: str, body: Dict[str, Any]) -> Tuple[str, 
                 if pattern.search(last_user_msg):
                     scores[category] += 1
 
-        if scores["flash"] >= 2 and scores["qwen"] == 0:
+        if scores["flash"] >= HEURISTIC_THRESHOLD and scores["qwen"] == 0:
             return (
                 "deepseek/deepseek-v4-flash",
                 f"Авто-маршрутизация (flash: {scores['flash']})",
             )
-        if scores["qwen"] >= 2 and scores["flash"] == 0:
+        if scores["qwen"] >= HEURISTIC_THRESHOLD and scores["flash"] == 0:
             return (
                 "qwen/qwen3-coder-next",
                 f"Авто-маршрутизация (qwen: {scores['qwen']})",
             )
 
+    # 8. Default
+    if last_identified_agent:
+        # Агент распознан, но стоит "auto" → default_worker
+        default = state.config.get("default_worker", requested_model)
+        return default, f"{mechanism} (auto → default)"
+    # Не распознан → проверяем coordinator в config или Pro
+    mapping = state.config.get("agent_to_worker_mapping", {})
+    model = mapping.get("coordinator")
+    if model and model != "auto":
+        return model, f"Config: coordinator → {model}"
     return requested_model, "Не найдено паттернов"
 
 
@@ -275,6 +628,22 @@ async def shutdown_event():
     await http_client.aclose()
 
 
+@app.get("/v1/models")
+async def list_models():
+    """OpenAI-compatible model list (требуется Zed при подключении)."""
+    models_list = []
+    for model_name, model_cfg in cfg.get("models", {}).items():
+        models_list.append(
+            {
+                "id": model_name,
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": model_cfg.get("provider", "SmartRouter"),
+            }
+        )
+    return {"object": "list", "data": models_list}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "cost": f"${state.stats['total_cost']:.4f}"}
@@ -285,6 +654,32 @@ async def get_stats():
     return state.stats
 
 
+@app.get("/logs")
+async def get_logs(level: str = Query(None), limit: int = Query(50)):
+    """Возвращает логи из кольцевого буфера."""
+    logs = list(log_buffer)
+    if level:
+        logs = [l for l in logs if l["level"] == level.upper()]
+    return logs[-limit:]
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page():
+    """Веб-страница админки: логи + управление агентами."""
+    admin_html = (
+        ADMIN_HTML_FILE.read_text(encoding="utf-8")
+        if ADMIN_HTML_FILE.exists()
+        else "<h1>admin.html not found</h1>"
+    )
+    return HTMLResponse(admin_html)
+
+
+@app.get("/config")
+async def get_config():
+    """Возвращает текущую конфигурацию маршрутизации."""
+    return state.config
+
+
 @app.post("/config")
 async def update_config(request: Request):
     try:
@@ -293,6 +688,130 @@ async def update_config(request: Request):
         return {"status": "ok", "config": state.config}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/providers")
+async def get_providers():
+    """Возвращает список провайдеров (без API-ключей)."""
+    result = {}
+    for name, p in state.providers.items():
+        result[name] = {k: v for k, v in p.items() if k != "api_key"}
+        # Показываем только маску ключа (первые 4 + последние 4 символа)
+        key_env = p.get("api_key_env", "")
+        api_key = os.getenv(key_env, "")
+        if api_key:
+            masked = api_key[:4] + "*" * (len(api_key) - 8) + api_key[-4:]
+            result[name]["api_key_masked"] = masked
+        result[name]["has_api_key"] = bool(api_key)
+    return {
+        "providers": result,
+        "active_provider": state._active_provider,
+    }
+
+
+@app.post("/providers")
+async def add_provider(request: Request):
+    """Добавляет или обновляет провайдера."""
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    name = data.get("name", "").strip().lower()
+    if not name:
+        raise HTTPException(status_code=400, detail="Provider name is required")
+    if not re.match(r"^[a-z][a-z0-9_]{2,30}$", name):
+        raise HTTPException(
+            status_code=400, detail="Invalid provider name (3-30 chars, a-z0-9_)"
+        )
+
+    provider = {
+        "display_name": data.get("display_name", name),
+        "base_url": data.get("base_url", ""),
+        "api_key_env": data.get("api_key_env", f"{name.upper()}_API_KEY"),
+        "default": data.get("default", False),
+        "models_endpoint": data.get("models_endpoint", ""),
+    }
+
+    if not provider["base_url"]:
+        raise HTTPException(status_code=400, detail="base_url is required")
+
+    # Если провайдер уже существует — обновляем, сохраняя ключи
+    old_provider = state.providers.get(name, {})
+    for k in ["api_key", "api_key_masked", "has_api_key"]:
+        if k in old_provider:
+            del old_provider[k]
+
+    state.providers[name] = provider
+
+    # Если default — снимаем default с остальных
+    if data.get("default", False):
+        for p_name in state.providers:
+            state.providers[p_name]["default"] = p_name == name
+        state._active_provider = name
+
+    # Сохраняем API-ключ, если передан
+    api_key_value = data.get("api_key", "")
+    if api_key_value:
+        await set_env_key(provider["api_key_env"], api_key_value)
+
+    # Сохраняем config.yaml
+    await state.save_config_yaml()
+
+    logger.info(f"🔌 Провайдер '{name}' сохранён")
+    return {
+        "status": "ok",
+        "provider": provider,
+        "active": name == state._active_provider,
+    }
+
+
+async def set_env_key(key_env: str, value: str):
+    """Записывает/обновляет API-ключ в .env файл."""
+    env_file = Path(__file__).parent / ".env"
+    if env_file.exists():
+        content = env_file.read_text(encoding="utf-8")
+        if f"{key_env}=" in content:
+            # Заменяем существующий ключ
+            lines = []
+            replaced = False
+            for line in content.splitlines():
+                if line.startswith(f"{key_env}="):
+                    lines.append(f"{key_env}={value}")
+                    replaced = True
+                else:
+                    lines.append(line)
+            if not replaced:
+                lines.append(f"{key_env}={value}")
+            env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        else:
+            with open(env_file, "a", encoding="utf-8") as f:
+                f.write(f"\n{key_env}={value}\n")
+    else:
+        env_file.write_text(f"{key_env}={value}\n", encoding="utf-8")
+    # Обновляем в runtime
+    load_dotenv(override=True)
+    logger.info(f"🔑 API-ключ {key_env} обновлён в .env")
+
+
+@app.delete("/providers/{name}")
+async def delete_provider(name: str):
+    """Удаляет провайдера."""
+    if name not in state.providers:
+        raise HTTPException(status_code=404, detail=f"Provider '{name}' not found")
+    if len(state.providers) <= 1:
+        raise HTTPException(status_code=400, detail="Cannot delete the last provider")
+
+    del state.providers[name]
+
+    # Если удалили активного — назначаем первого
+    if name == state._active_provider:
+        state._active_provider = next(iter(state.providers.keys()))
+        state.providers[state._active_provider]["default"] = True
+
+    await state.save_config_yaml()
+    logger.info(f"🔌 Провайдер '{name}' удалён")
+    return {"status": "ok", "active_provider": state._active_provider}
 
 
 @app.post("/v1/chat/completions")
@@ -317,9 +836,18 @@ async def proxy(request: Request):
     else:
         state.stats["not_routed_count"] += 1
 
-    target_url = "https://routerai.ru/api/v1/chat/completions"
+    # Используем динамический URL из state (активный провайдер)
+    target_url = state.get_active_provider_url()
+    key_env = state.get_active_provider_key_env()
+    api_key = os.getenv(key_env, "")
+    if not api_key:
+        logger.error(
+            f"API-ключ для провайдера '{state._active_provider}' не найден в ${key_env}"
+        )
+        raise HTTPException(status_code=502, detail=f"Missing API key: {key_env}")
+
     headers = {
-        "Authorization": f"Bearer {sanitize_ascii(ROUTERAI_KEY)}",
+        "Authorization": f"Bearer {sanitize_ascii(api_key)}",
         "Content-Type": "application/json",
     }
 

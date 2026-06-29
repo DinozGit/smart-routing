@@ -1,13 +1,6 @@
 {
   "agent_to_worker_mapping": {
-    "database": "deepseek/deepseek-v4-flash",
-    "tests": "deepseek/deepseek-v4-flash",
-    "bot": "deepseek/deepseek-v4-flash",
-    "devops": "deepseek/deepseek-v4-flash",
-    "api": "deepseek/deepseek-v4-flash",
-    "services": "deepseek/deepseek-v4-flash",
-    "frontend": "qwen/qwen3-coder-next",
-    "coordinator": "deepseek/deepseek-v4-pro"
+    "coordinator": "z-ai/glm-5.2"
   },
   "default_worker": "deepseek/deepseek-v4-flash",
   "enable_auto_routing": true

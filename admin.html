@@ -1,0 +1,1094 @@
+<!doctype html>
+<html lang="ru">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>SmartRouter Admin</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            body {
+                font-family: "Segoe UI", system-ui, sans-serif;
+                background: #0d1117;
+                color: #c9d1d9;
+                padding: 20px;
+            }
+            h1 {
+                font-size: 24px;
+                margin-bottom: 4px;
+                color: #58a6ff;
+            }
+            .sub {
+                color: #8b949e;
+                font-size: 14px;
+                margin-bottom: 16px;
+            }
+
+            /* Tabs */
+            .tabs {
+                display: flex;
+                gap: 0;
+                margin-bottom: 16px;
+                border-bottom: 1px solid #30363d;
+            }
+            .tab {
+                padding: 8px 18px;
+                border: 1px solid transparent;
+                border-bottom: none;
+                border-radius: 6px 6px 0 0;
+                cursor: pointer;
+                font-size: 14px;
+                color: #8b949e;
+                background: transparent;
+                margin-bottom: -1px;
+            }
+            .tab:hover {
+                color: #c9d1d9;
+                background: #161b22;
+            }
+            .tab.active {
+                color: #58a6ff;
+                border-color: #30363d;
+                background: #0d1117;
+                font-weight: 600;
+            }
+
+            .tab-content {
+                display: none;
+            }
+            .tab-content.active {
+                display: block;
+            }
+
+            /* Stats grid */
+            .stats-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+                gap: 12px;
+                margin-bottom: 20px;
+            }
+            .stat-card {
+                background: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 14px;
+            }
+            .stat-label {
+                font-size: 12px;
+                color: #8b949e;
+                text-transform: uppercase;
+            }
+            .stat-value {
+                font-size: 22px;
+                font-weight: 600;
+                margin-top: 4px;
+            }
+
+            /* Agents config */
+            .config-card {
+                background: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 20px;
+                margin-bottom: 16px;
+            }
+            .config-title {
+                font-size: 15px;
+                font-weight: 600;
+                margin-bottom: 12px;
+                color: #c9d1d9;
+            }
+            .config-row {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                margin-bottom: 10px;
+                flex-wrap: wrap;
+            }
+            .config-row label {
+                min-width: 130px;
+                font-size: 13px;
+                color: #8b949e;
+            }
+            .config-row select,
+            .config-row input[type="text"] {
+                background: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: #c9d1d9;
+                font-size: 13px;
+                min-width: 220px;
+            }
+            .config-row select:focus,
+            .config-row input:focus {
+                border-color: #58a6ff;
+                outline: none;
+            }
+
+            .agent-table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 13px;
+            }
+            .agent-table th {
+                padding: 8px 12px;
+                text-align: left;
+                color: #8b949e;
+                border-bottom: 1px solid #30363d;
+                font-weight: 600;
+            }
+            .agent-table td {
+                padding: 8px 12px;
+                border-bottom: 1px solid #21262d;
+            }
+            .agent-table tr:hover td {
+                background: #1c2128;
+            }
+            .agent-table select {
+                background: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 4px;
+                padding: 4px 8px;
+                color: #c9d1d9;
+                font-size: 12px;
+                width: 100%;
+            }
+            .agent-table select:focus {
+                border-color: #58a6ff;
+                outline: none;
+            }
+
+            .btn {
+                padding: 8px 20px;
+                border-radius: 6px;
+                border: 1px solid #30363d;
+                cursor: pointer;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            .btn-primary {
+                background: #1f6feb;
+                border-color: #1f6feb;
+                color: #fff;
+            }
+            .btn-primary:hover {
+                background: #388bfd;
+            }
+            .btn-success {
+                background: #238636;
+                border-color: #238636;
+                color: #fff;
+            }
+            .btn-success:hover {
+                background: #2ea043;
+            }
+            .btn:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+
+            .save-status {
+                margin-top: 10px;
+                font-size: 13px;
+                padding: 8px 12px;
+                border-radius: 6px;
+                display: none;
+            }
+            .save-status.ok {
+                display: block;
+                background: #23863620;
+                border: 1px solid #238636;
+                color: #3fb950;
+            }
+            .save-status.err {
+                display: block;
+                background: #f8514920;
+                border: 1px solid #f85149;
+                color: #f85149;
+            }
+
+            /* Toggle switch */
+            .toggle-wrap {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .toggle {
+                cursor: pointer;
+                position: relative;
+                width: 36px;
+                height: 20px;
+                display: inline-block;
+            }
+            .toggle input {
+                display: none;
+            }
+            .toggle-slider {
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: #30363d;
+                border-radius: 10px;
+                transition: 0.2s;
+            }
+            .toggle-slider::before {
+                content: "";
+                position: absolute;
+                height: 16px;
+                width: 16px;
+                left: 2px;
+                bottom: 2px;
+                background: #c9d1d9;
+                border-radius: 50%;
+                transition: 0.2s;
+            }
+            .toggle input:checked + .toggle-slider {
+                background: #1f6feb;
+            }
+            .toggle input:checked + .toggle-slider::before {
+                transform: translateX(16px);
+            }
+
+            /* Logs */
+            .top-bar {
+                display: flex;
+                gap: 12px;
+                align-items: center;
+                margin-bottom: 16px;
+                flex-wrap: wrap;
+            }
+            .filter-btn {
+                padding: 6px 14px;
+                border-radius: 6px;
+                border: 1px solid #30363d;
+                background: #161b22;
+                color: #c9d1d9;
+                cursor: pointer;
+                font-size: 13px;
+            }
+            .filter-btn.active {
+                background: #1f6feb;
+                border-color: #1f6feb;
+                color: #fff;
+            }
+            .filter-btn:hover {
+                background: #21262d;
+            }
+            .log-container {
+                background: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                overflow: hidden;
+            }
+            .log-header {
+                display: flex;
+                justify-content: space-between;
+                padding: 10px 16px;
+                background: #161b22;
+                border-bottom: 1px solid #30363d;
+            }
+            .log-header span {
+                font-size: 13px;
+                color: #8b949e;
+                cursor: pointer;
+            }
+            .log-header span:hover {
+                color: #58a6ff;
+            }
+            #log-list {
+                max-height: 55vh;
+                overflow-y: auto;
+                font-family:
+                    "Cascadia Code", "Fira Code", "Consolas", monospace;
+                font-size: 13px;
+                line-height: 1.5;
+            }
+            .log-entry {
+                padding: 4px 16px;
+                border-bottom: 1px solid #21262d;
+                display: flex;
+                gap: 12px;
+            }
+            .log-entry:hover {
+                background: #161b22;
+            }
+            .log-time {
+                color: #484f58;
+                min-width: 60px;
+                flex-shrink: 0;
+            }
+            .log-level {
+                min-width: 50px;
+                flex-shrink: 0;
+                font-weight: 600;
+            }
+            .log-level.INFO {
+                color: #58a6ff;
+            }
+            .log-level.WARNING {
+                color: #d29922;
+            }
+            .log-level.ERROR {
+                color: #f85149;
+            }
+            .log-level.CRITICAL {
+                color: #f85149;
+                background: rgba(248, 81, 73, 0.15);
+                padding: 0 4px;
+                border-radius: 4px;
+            }
+            .log-msg {
+                color: #c9d1d9;
+                word-break: break-all;
+            }
+            .log-msg .hl {
+                color: #3fb950;
+            }
+            .log-msg .route {
+                color: #d2a8ff;
+            }
+            .log-msg .model {
+                color: #79c0ff;
+            }
+            .log-msg .cost {
+                color: #ffa657;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>🧠 SmartRouter</h1>
+        <p class="sub" id="sub">Dashboard</p>
+
+        <div class="stats-grid" id="stats">
+            <div class="stat-card">
+                <div class="stat-label">Requests</div>
+                <div class="stat-value" id="s-req">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Routed</div>
+                <div class="stat-value" id="s-routed" style="color: #3fb950">
+                    -
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Not Routed</div>
+                <div class="stat-value" id="s-notrouted" style="color: #d29922">
+                    -
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total Cost</div>
+                <div class="stat-value" id="s-cost">-</div>
+            </div>
+        </div>
+
+        <div class="tabs">
+            <div class="tab active" data-tab="logs" onclick="switchTab('logs')">
+                📋 Logs
+            </div>
+            <div class="tab" data-tab="agents" onclick="switchTab('agents')">
+                ⚙️ Agents
+            </div>
+            <div
+                class="tab"
+                data-tab="providers"
+                onclick="switchTab('providers')"
+            >
+                🔌 Providers
+            </div>
+        </div>
+
+        <!-- TAB: Logs -->
+        <div id="tab-logs" class="tab-content active">
+            <div class="top-bar">
+                <button class="filter-btn active" data-level="">All</button>
+                <button class="filter-btn" data-level="INFO">INFO</button>
+                <button class="filter-btn" data-level="WARNING">WARN</button>
+                <button class="filter-btn" data-level="ERROR">ERROR</button>
+                <div
+                    style="
+                        margin-left: auto;
+                        display: flex;
+                        gap: 8px;
+                        align-items: center;
+                    "
+                >
+                    <span style="font-size: 13px; color: #8b949e"
+                        >Auto-refresh:</span
+                    >
+                    <button
+                        class="filter-btn active"
+                        id="toggle-refresh"
+                        style="min-width: 60px"
+                    >
+                        ON
+                    </button>
+                </div>
+            </div>
+            <div class="log-container">
+                <div class="log-header">
+                    <span>Logs</span>
+                    <span
+                        onclick="
+                            document.getElementById('log-list').scrollTop = 0
+                        "
+                        >⬆ Top</span
+                    >
+                </div>
+                <div id="log-list">
+                    <div class="log-entry">
+                        <span style="color: #8b949e">Loading...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB: Agents -->
+        <div id="tab-agents" class="tab-content">
+            <div class="config-card">
+                <div class="config-title">Models</div>
+                <div class="config-row">
+                    <label>🧠 Coordinator:</label>
+                    <select id="model-coordinator"></select>
+                    <span style="font-size: 12px; color: #8b949e"
+                        >принудительно, <b>auto</b> = fingerprinting</span
+                    >
+                </div>
+                <div class="config-row">
+                    <label>⚡ Worker (default):</label>
+                    <select id="model-default-worker"></select>
+                </div>
+                <div class="config-row">
+                    <label>💻 Frontend:</label>
+                    <select id="model-frontend"></select>
+                </div>
+                <div class="config-row">
+                    <div class="toggle-wrap">
+                        <label class="toggle">
+                            <input type="checkbox" id="toggle-auto-routing" />
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span style="font-size: 13px; color: #8b949e"
+                            >Auto-routing enabled</span
+                        >
+                    </div>
+                </div>
+            </div>
+
+            <div class="config-card">
+                <div class="config-title">Agent → Model Mapping</div>
+                <table class="agent-table">
+                    <thead>
+                        <tr>
+                            <th>Agent</th>
+                            <th>Mapped Model</th>
+                        </tr>
+                    </thead>
+                    <tbody id="agent-mapping-body"></tbody>
+                </table>
+            </div>
+
+            <button
+                class="btn btn-success"
+                id="btn-save-config"
+                onclick="saveConfig()"
+            >
+                💾 Save Configuration
+            </button>
+            <div id="save-status" class="save-status"></div>
+        </div>
+
+        <!-- TAB: Providers -->
+        <div id="tab-providers" class="tab-content">
+            <div class="config-card">
+                <div class="config-title">Provider Management</div>
+                <div
+                    style="margin-bottom: 12px; font-size: 13px; color: #8b949e"
+                >
+                    Active provider:
+                    <strong id="active-provider-name">-</strong>
+                </div>
+                <div id="providers-list"></div>
+            </div>
+
+            <div class="config-card">
+                <div class="config-title">Add / Edit Provider</div>
+                <div class="config-row">
+                    <label>Variable name:</label>
+                    <input
+                        type="text"
+                        id="pf-name"
+                        placeholder="openrouter"
+                        style="min-width: 200px"
+                    />
+                </div>
+                <div class="config-row">
+                    <label>Display name:</label>
+                    <input
+                        type="text"
+                        id="pf-display"
+                        placeholder="OpenRouter"
+                        style="min-width: 200px"
+                    />
+                </div>
+                <div class="config-row">
+                    <label>Base URL:</label>
+                    <input
+                        type="text"
+                        id="pf-url"
+                        placeholder="https://openrouter.ai/api/v1/chat/completions"
+                        style="min-width: 350px"
+                    />
+                </div>
+                <div class="config-row">
+                    <label>API Key env var:</label>
+                    <input
+                        type="text"
+                        id="pf-keyenv"
+                        placeholder="OPENROUTER_API_KEY"
+                        style="min-width: 200px"
+                    />
+                </div>
+                <div class="config-row">
+                    <label>API Key value:</label>
+                    <input
+                        type="password"
+                        id="pf-key"
+                        placeholder="sk-or-..."
+                        style="min-width: 300px"
+                    />
+                    <span style="font-size: 12px; color: #8b949e"
+                        >(записывается в .env)</span
+                    >
+                </div>
+                <div class="config-row">
+                    <label>Models endpoint:</label>
+                    <input
+                        type="text"
+                        id="pf-models"
+                        placeholder="https://openrouter.ai/api/v1/models"
+                        style="min-width: 300px"
+                    />
+                </div>
+                <div class="config-row">
+                    <div class="toggle-wrap">
+                        <label class="toggle">
+                            <input type="checkbox" id="pf-default" />
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span style="font-size: 13px; color: #8b949e"
+                            >Set as default provider</span
+                        >
+                    </div>
+                </div>
+                <div>
+                    <button class="btn btn-primary" onclick="saveProvider()">
+                        💾 Save Provider
+                    </button>
+                    <button
+                        class="btn"
+                        onclick="clearProviderForm()"
+                        style="margin-left: 8px"
+                    >
+                        ↩️ Cancel
+                    </button>
+                </div>
+                <div id="provider-save-status" class="save-status"></div>
+            </div>
+        </div>
+
+        <script>
+            // ========== State ==========
+            let currentLevel = "";
+            let autoRefresh = true;
+            let refreshTimer = null;
+            let availableModels = [];
+            let currentConfig = {};
+
+            // ========== Tab switching ==========
+            function switchTab(name) {
+                document
+                    .querySelectorAll(".tab")
+                    .forEach((t) =>
+                        t.classList.toggle("active", t.dataset.tab === name),
+                    );
+                document
+                    .querySelectorAll(".tab-content")
+                    .forEach((t) =>
+                        t.classList.toggle("active", t.id === "tab-" + name),
+                    );
+                if (name === "agents") loadAgentConfig();
+            }
+
+            // ========== Config API ==========
+            async function loadAgentConfig() {
+                const resp = await fetch("/config");
+                currentConfig = await resp.json();
+                renderAgentConfig();
+            }
+
+            function renderAgentConfig() {
+                const mapping = currentConfig.agent_to_worker_mapping || {};
+                const models = getModelOptionsHtml();
+
+                // Update selects
+                setSelectValue(
+                    "model-coordinator",
+                    mapping.coordinator || "auto",
+                );
+                setSelectValue(
+                    "model-default-worker",
+                    currentConfig.default_worker ||
+                        "deepseek/deepseek-v4-flash",
+                );
+                setSelectValue(
+                    "model-frontend",
+                    mapping.frontend || "qwen/qwen3-coder-next",
+                );
+                document.getElementById("toggle-auto-routing").checked =
+                    currentConfig.enable_auto_routing !== false;
+
+                // Agent mapping table (skip coordinator, it has its own select)
+                const agentTable =
+                    document.getElementById("agent-mapping-body");
+                agentTable.innerHTML = "";
+                for (const [agent, model] of Object.entries(mapping)) {
+                    if (agent === "coordinator") continue;
+                    const tr = document.createElement("tr");
+                    const nameMap = {
+                        database: "🗄️",
+                        tests: "🧪",
+                        bot: "🤖",
+                        devops: "🚀",
+                        api: "🔧",
+                        services: "⚙️",
+                        frontend: "💻",
+                        mobile: "📱",
+                        design: "🎨",
+                    };
+                    const icon = nameMap[agent] || "";
+                    tr.innerHTML = `<td>${icon} ${agent.charAt(0).toUpperCase() + agent.slice(1)}</td>
+      <td><select data-agent="${agent}" onchange="onAgentChange(this)">${models}</select></td>`;
+                    tr.querySelector("select").value = model;
+                    agentTable.appendChild(tr);
+                }
+            }
+
+            function getModelOptionsHtml() {
+                return availableModels
+                    .map(
+                        (m) =>
+                            `<option value="${m}">${m.replace("deepseek/", "").replace("qwen/", "")}</option>`,
+                    )
+                    .join("");
+            }
+
+            function setSelectValue(id, value) {
+                const sel = document.getElementById(id);
+                if (!sel) return;
+                sel.value = value;
+                if (!sel.value) {
+                    sel.value = value;
+                }
+            }
+
+            function onAgentChange(sel) {
+                // individual agent change is handled, no need for extra logic
+            }
+
+            async function saveConfig() {
+                const saveStatus = document.getElementById("save-status");
+                const btn = document.getElementById("btn-save-config");
+                btn.disabled = true;
+                btn.textContent = "⏳ Saving...";
+                saveStatus.className = "save-status";
+
+                const coordinatorModel =
+                    document.getElementById("model-coordinator").value;
+                const defaultWorker = document.getElementById(
+                    "model-default-worker",
+                ).value;
+                const frontendModel =
+                    document.getElementById("model-frontend").value;
+
+                // Coordinator: значение из UI (auto или конкретная модель)
+                const mapping = {
+                    coordinator: coordinatorModel,
+                    frontend: frontendModel,
+                };
+                document
+                    .querySelectorAll("#agent-mapping-body select[data-agent]")
+                    .forEach((sel) => {
+                        mapping[sel.dataset.agent] = sel.value;
+                    });
+
+                const newConfig = {
+                    agent_to_worker_mapping: mapping,
+                    default_worker: defaultWorker,
+                    enable_auto_routing: document.getElementById(
+                        "toggle-auto-routing",
+                    ).checked,
+                };
+
+                try {
+                    const resp = await fetch("/config", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(newConfig),
+                    });
+                    if (!resp.ok) throw new Error("HTTP " + resp.status);
+                    const result = await resp.json();
+                    currentConfig = result.config;
+                    saveStatus.className = "save-status ok";
+                    saveStatus.textContent =
+                        "✅ Configuration saved! Updated " +
+                        Object.keys(result.config.agent_to_worker_mapping || {})
+                            .length +
+                        " agents.";
+                } catch (e) {
+                    saveStatus.className = "save-status err";
+                    saveStatus.textContent = "❌ Error: " + e.message;
+                }
+                btn.disabled = false;
+                btn.textContent = "💾 Save Configuration";
+                setTimeout(() => {
+                    saveStatus.className = "save-status";
+                }, 4000);
+            }
+
+            // ========== Logs ==========
+            document
+                .querySelectorAll(".filter-btn[data-level]")
+                .forEach((btn) => {
+                    btn.onclick = () => {
+                        document
+                            .querySelectorAll(".filter-btn[data-level]")
+                            .forEach((b) => b.classList.remove("active"));
+                        btn.classList.add("active");
+                        currentLevel = btn.dataset.level;
+                        fetchLogs();
+                    };
+                });
+
+            document.getElementById("toggle-refresh").onclick = function () {
+                autoRefresh = !autoRefresh;
+                this.textContent = autoRefresh ? "ON" : "OFF";
+                this.classList.toggle("active", autoRefresh);
+                if (autoRefresh) fetchLogs();
+                else if (refreshTimer) {
+                    clearTimeout(refreshTimer);
+                    refreshTimer = null;
+                }
+            };
+
+            function fetchLogs() {
+                const params = new URLSearchParams({ limit: 200 });
+                if (currentLevel) params.set("level", currentLevel);
+                fetch("/logs?" + params.toString())
+                    .then((r) => r.json())
+                    .then((logs) => {
+                        updateStats();
+                        const list = document.getElementById("log-list");
+                        list.innerHTML = logs
+                            .reverse()
+                            .map((l) => {
+                                let msg = l.message
+                                    .replace(
+                                        /(?:UserMsg fingerprint|Fingerprint|Agent tag|spawn_agent)/g,
+                                        '<span class="hl">$&</span>',
+                                    )
+                                    .replace(
+                                        /(?:маршрутизация|Без изменений|Авто-маршрутизация).*?(?=\)|$)/gi,
+                                        '<span class="route">$&</span>',
+                                    )
+                                    .replace(
+                                        /(deepseek\/[\w\/-]+|qwen\/[\w\/-]+)/g,
+                                        '<span class="model">$1</span>',
+                                    )
+                                    .replace(
+                                        /(\$\d+\.\d+)/g,
+                                        '<span class="cost">$1</span>',
+                                    );
+                                return (
+                                    '<div class="log-entry"><span class="log-time">' +
+                                    l.time +
+                                    '</span><span class="log-level ' +
+                                    l.level +
+                                    '">' +
+                                    l.level +
+                                    '</span><span class="log-msg">' +
+                                    msg +
+                                    "</span></div>"
+                                );
+                            })
+                            .join("");
+                    })
+                    .catch(() => {
+                        document.getElementById("log-list").innerHTML =
+                            '<div class="log-entry"><span style="color:#f85149">Connection error</span></div>';
+                    });
+                if (autoRefresh) refreshTimer = setTimeout(fetchLogs, 2000);
+            }
+
+            function updateStats() {
+                fetch("/stats")
+                    .then((r) => r.json())
+                    .then((s) => {
+                        document.getElementById("s-req").textContent =
+                            s.requests || 0;
+                        document.getElementById("s-routed").textContent =
+                            s.routed_count || 0;
+                        document.getElementById("s-notrouted").textContent =
+                            s.not_routed_count || 0;
+                        document.getElementById("s-cost").textContent =
+                            "$" + (s.total_cost || 0).toFixed(4);
+                        document.getElementById("sub").textContent =
+                            "Requests: " +
+                            (s.requests || 0) +
+                            " | Cost: $" +
+                            (s.total_cost || 0).toFixed(4);
+                    })
+                    .catch(() => {});
+            }
+
+            // ========== Init ==========
+            // "auto" = fingerprinting (не принудительно)
+            availableModels = ["auto"];
+
+            // Load models from API + populate dropdowns
+            async function initModels() {
+                try {
+                    const resp = await fetch("/v1/models");
+                    const data = await resp.json();
+                    const models = (data.data || []).map((m) => m.id);
+                    // Add loaded models after "auto"
+                    models.forEach((m) => {
+                        if (!availableModels.includes(m)) {
+                            availableModels.push(m);
+                        }
+                    });
+                } catch (e) {
+                    console.warn(
+                        "Could not load models from API, using defaults",
+                    );
+                    // Fallback defaults
+                    [
+                        "deepseek/deepseek-v4-pro",
+                        "deepseek/deepseek-v4-flash",
+                        "qwen/qwen3-coder-next",
+                    ].forEach((m) => {
+                        if (!availableModels.includes(m)) {
+                            availableModels.push(m);
+                        }
+                    });
+                }
+                // Populate all selects
+                const modelOpts = getModelOptionsHtml();
+                document.querySelectorAll("select").forEach((s) => {
+                    if (!s.dataset.agent && !s.id.startsWith("model-")) return;
+                    if (!s.querySelector("option")) {
+                        s.innerHTML = modelOpts;
+                    }
+                });
+                loadAgentConfig();
+            }
+
+            initModels();
+            fetchLogs();
+            loadProviders();
+
+            // ========== Providers ==========
+            function loadProviders() {
+                fetch("/providers")
+                    .then((r) => r.json())
+                    .then((data) => {
+                        const list = document.getElementById("providers-list");
+                        const entries = Object.entries(data.providers || {});
+                        if (entries.length === 0) {
+                            list.innerHTML =
+                                '<div style="color:#8b949e;padding:12px">No providers configured.</div>';
+                            return;
+                        }
+                        document.getElementById(
+                            "active-provider-name",
+                        ).textContent = data.active_provider || "-";
+                        list.innerHTML =
+                            '<table class="agent-table"><thead><tr><th>Name</th><th>Base URL</th><th>API Key</th><th>Default</th><th></th></tr></thead><tbody>' +
+                            entries
+                                .map(([name, p]) => {
+                                    const keyStatus = p.has_api_key
+                                        ? '<span style="color:#3fb950">' +
+                                          (p.api_key_masked || "") +
+                                          "</span>"
+                                        : '<span style="color:#d29922">not set</span>';
+                                    return (
+                                        "<tr>" +
+                                        "<td><strong>" +
+                                        (p.display_name || name) +
+                                        '</strong><br><span style="font-size:11px;color:#8b949e">' +
+                                        name +
+                                        "</span></td>" +
+                                        '<td style="font-size:12px;word-break:break-all">' +
+                                        p.base_url +
+                                        "</td>" +
+                                        "<td>" +
+                                        keyStatus +
+                                        "</td>" +
+                                        "<td>" +
+                                        (p.default
+                                            ? '<span style="color:#58a6ff;font-weight:600">Default</span>'
+                                            : "") +
+                                        "</td>" +
+                                        '<td style="white-space:nowrap">' +
+                                        '<button class="btn" style="padding:3px 10px;font-size:11px" onclick="editProvider(\'' +
+                                        name +
+                                        "')\">Edit</button> " +
+                                        '<button class="btn" style="padding:3px 10px;font-size:11px" onclick="deleteProvider(\'' +
+                                        name +
+                                        "')\">Delete</button>" +
+                                        "</td></tr>"
+                                    );
+                                })
+                                .join("") +
+                            "</tbody></table>";
+                    })
+                    .catch(() => {
+                        document.getElementById("providers-list").innerHTML =
+                            '<div style="color:#f85149;padding:12px">Failed to load providers</div>';
+                    });
+            }
+
+            let editingProvider = null;
+
+            function editProvider(name) {
+                editingProvider = name;
+                fetch("/providers")
+                    .then((r) => r.json())
+                    .then((data) => {
+                        const p = (data.providers || {})[name];
+                        if (!p) return;
+                        document.getElementById("pf-name").value = name;
+                        document.getElementById("pf-name").readOnly = true;
+                        document.getElementById("pf-display").value =
+                            p.display_name || "";
+                        document.getElementById("pf-url").value =
+                            p.base_url || "";
+                        document.getElementById("pf-keyenv").value =
+                            p.api_key_env || "";
+                        document.getElementById("pf-key").value = "";
+                        document.getElementById("pf-models").value =
+                            p.models_endpoint || "";
+                        document.getElementById("pf-default").checked =
+                            p.default || false;
+                        switchTab("providers");
+                    });
+            }
+
+            function clearProviderForm() {
+                editingProvider = null;
+                [
+                    "pf-name",
+                    "pf-display",
+                    "pf-url",
+                    "pf-keyenv",
+                    "pf-key",
+                    "pf-models",
+                ].forEach(function (id) {
+                    var el = document.getElementById(id);
+                    if (el) {
+                        el.value = "";
+                        el.readOnly = false;
+                    }
+                });
+                var cb = document.getElementById("pf-default");
+                if (cb) cb.checked = false;
+            }
+
+            function saveProvider() {
+                var name = document.getElementById("pf-name").value.trim();
+                var display = document
+                    .getElementById("pf-display")
+                    .value.trim();
+                var url = document.getElementById("pf-url").value.trim();
+                var keyenv = document.getElementById("pf-keyenv").value.trim();
+                var key = document.getElementById("pf-key").value.trim();
+                var models = document.getElementById("pf-models").value.trim();
+                var isDefault = document.getElementById("pf-default").checked;
+
+                if (!name) {
+                    showProviderStatus("err", "Name is required");
+                    return;
+                }
+                if (!url) {
+                    showProviderStatus("err", "Base URL is required");
+                    return;
+                }
+
+                var body = {
+                    name: editingProvider || name,
+                    display_name: display || name,
+                    base_url: url,
+                    api_key_env: keyenv || name.toUpperCase() + "_API_KEY",
+                    api_key: key,
+                    models_endpoint: models,
+                    default: isDefault,
+                };
+
+                fetch("/providers", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                })
+                    .then(function (r) {
+                        return r.json();
+                    })
+                    .then(function (data) {
+                        if (data.status === "ok") {
+                            showProviderStatus(
+                                "ok",
+                                "Saved! Active: " + data.active,
+                            );
+                            clearProviderForm();
+                            loadProviders();
+                            setTimeout(function () {
+                                document.getElementById(
+                                    "provider-save-status",
+                                ).className = "save-status";
+                            }, 3000);
+                        } else {
+                            showProviderStatus("err", data.detail || "Error");
+                        }
+                    })
+                    .catch(function (e) {
+                        showProviderStatus("err", e.message);
+                    });
+            }
+
+            function showProviderStatus(cls, msg) {
+                var el = document.getElementById("provider-save-status");
+                el.className = "save-status " + cls;
+                el.textContent = msg;
+            }
+
+            function deleteProvider(name) {
+                if (!confirm("Delete provider '" + name + "'?")) return;
+                fetch("/providers/" + name, { method: "DELETE" })
+                    .then(function (r) {
+                        return r.json();
+                    })
+                    .then(function () {
+                        loadProviders();
+                    })
+                    .catch(function (e) {
+                        alert("Failed: " + e.message);
+                    });
+            }
+        </script>
+    </body>
+</html>

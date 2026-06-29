@@ -31,6 +31,21 @@ User
 - ❌ НЕ пиши код сам (даже если задача кажется простой)
 - ✅ ВСЕГДА spawn'и соответствующего агента
 
+### 🏷️ ПРАВИЛО МАРШРУТИЗАЦИИ ДЛЯ SMART ROUTER
+
+При вызове spawn_agent() КАЖДОЕ сообщение sub-agent'у ДОЛЖНО начинаться с:
+`[AGENT:agent_name]`
+
+Где agent_name — один из: database, tests, bot, devops, api, services, frontend, mobile, design
+
+Пример:
+```
+spawn_agent("🗄️ CalorIt Database", "[AGENT:database] Создай миграцию для новой таблицы users")
+```
+
+Это нужно для того, чтобы SmartRouter мог подобрать дешёвую модель (DeepSeek Flash)
+вместо дорогой Coordinator-модели (DeepSeek Pro).
+
 ### Примеры:
 
 **Плохо (тратит дорогие токены Coordinator-а):**

@@ -1,0 +1,54 @@
+api_blacklist:
+  - gpt-3.5
+  - gpt-3.5-turbo
+  - claude-2
+  - claude-2.0
+  - claude-2.1
+  - gemini-pro
+  - gpt-4-turbo-preview
+  - gpt-4-32k
+  - text-davinci
+logging:
+  level: INFO
+  max_entries: 500
+models:
+  deepseek/deepseek-v4-flash:
+    emoji: ⚡
+    input_price: 0.05
+    output_price: 0.2
+    provider: RouterAI
+    role: Worker
+  deepseek/deepseek-v4-pro:
+    emoji: 🧠
+    input_price: 0.5
+    output_price: 1.5
+    provider: RouterAI
+    role: Coordinator
+  qwen/qwen3-coder-next:
+    emoji: 💻
+    input_price: 0.11
+    output_price: 0.84
+    provider: RouterAI
+    role: Frontend
+  z-ai/glm-5.2:
+    emoji: 🧪
+    input_price: 0.2
+    output_price: 0.6
+    provider: RouterAI
+    role: Coordinator
+providers:
+  routerai:
+    api_key_env: ROUTERAI_KEY
+    base_url: https://routerai.ru/api/v1/chat/completions
+    default: true
+    display_name: RouterAI
+    models_endpoint: https://routerai.ru/api/v1/models
+routing:
+  coordinator_prompt_threshold: 3000
+  heuristic_threshold: 2
+  min_fingerprint_score: 10
+  min_scope_score: 8
+server:
+  admin_host: 127.0.0.1
+  admin_port: 8766
+  router_port: 8765
