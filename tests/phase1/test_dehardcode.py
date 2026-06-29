@@ -40,7 +40,7 @@ class TestDehardcodeCoordinatorFallback:
             ]
         }
         model, _, _ = smart_route_model("SmartAuto", body)
-        # coordinator model в config — z-ai/glm-5.2
+        # coordinator model в config — deepseek/deepseek-v4-pro
         assert "glm" not in model.lower(), (
             f"Unknown request routed to coordinator model (glm): {model}"
         )
@@ -57,9 +57,12 @@ class TestDehardcodeCoordinatorFallback:
             ]
         }
         model, role, reason = smart_route_model("SmartAuto", body)
-        # Coordinator должен пройти через fingerprint → coordinator model
-        assert "glm" in model.lower() or "pro" in model.lower(), (
-            f"Coordinator not routed to coordinator model: {model} ({reason})"
+        # Coordinator должен пройти через fingerprint → coordinator model (pro)
+        assert "pro" in model.lower(), (
+            f"Coordinator not routed to pro model: {model} ({reason})"
+        )
+        assert "glm" not in model.lower(), (
+            f"Coordinator should not be GLM: {model}"
         )
         assert role == "coordinator", f"Expected role='coordinator', got '{role}'"
 

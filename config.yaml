@@ -47,8 +47,7 @@ roles:
   coordinator:
     name: "🧠 Coordinator"
     description: "Сложные задачи, код-ревью, архитектура"
-    default_model: "z-ai/glm-5.2"
-    fallback_model: "deepseek/deepseek-v4-flash"
+    default_model: "deepseek/deepseek-v4-pro"
     agents:
       - coordinator
     capabilities:
@@ -59,7 +58,6 @@ roles:
     name: "⚡ Worker (default)"
     description: "Технические задачи — database, api, tests, bot, services, devops"
     default_model: "deepseek/deepseek-v4-flash"
-    fallback_model: "z-ai/glm-5.2"
     agents:
       - database
       - tests
@@ -75,7 +73,6 @@ roles:
     name: "🖼️ Worker Img"
     description: "Задачи с изображениями — frontend, mobile, design"
     default_model: "qwen/qwen3-coder-next"
-    fallback_model: "deepseek/deepseek-v4-flash"
     agents:
       - frontend
       - mobile

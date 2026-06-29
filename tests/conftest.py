@@ -29,6 +29,67 @@ def fresh_http_client():
     # сборщик мусора разберётся
 
 
+@pytest.fixture(autouse=True, scope="function")
+def isolate_config(tmp_path):
+    """
+    Изолирует routing.json и models_cache.json от продакшен-файлов.
+    Подменяет state.config_file и state.models_cache_file на временные,
+    чтобы тесты не портили реальные файлы.
+    """
+    import router
+
+    # Сохраняем оригиналы
+    orig_config_file = router.state.config_file
+    orig_models_cache_file = router.state.models_cache_file
+    orig_config = dict(router.state.config)
+    orig_available_models = dict(router.state.available_models)
+
+    # Берём модели из config.yaml (не хардкодим!)
+    coord_model = (
+        router.get_role_default_model("coordinator") or "deepseek/deepseek-v4-pro"
+    )
+    worker_model = (
+        router.get_role_default_model("worker_default") or "deepseek/deepseek-v4-flash"
+    )
+    img_model = router.get_role_default_model("worker_img") or "qwen/qwen3-coder-next"
+
+    # Создаём временный routing.json
+    tmp_routing = tmp_path / "routing.json"
+    routing_data = {
+        "agent_to_worker_mapping": {
+            "database": worker_model,
+            "frontend": img_model,
+            "coordinator": coord_model,
+        },
+        "default_worker": worker_model,
+        "enable_auto_routing": True,
+    }
+    tmp_routing.write_text(
+        json.dumps(routing_data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    # Создаём пустой models_cache.json
+    tmp_models = tmp_path / "models_cache.json"
+    tmp_models.write_text(
+        json.dumps({"models": [], "last_sync": None, "provider": "routerai"}),
+        encoding="utf-8",
+    )
+
+    # Подменяем пути и перезагружаем
+    router.state.config_file = tmp_routing
+    router.state.models_cache_file = tmp_models
+    router.state.config = dict(routing_data)
+    router.state.available_models = {}
+
+    yield
+
+    # Восстанавливаем
+    router.state.config_file = orig_config_file
+    router.state.models_cache_file = orig_models_cache_file
+    router.state.config = orig_config
+    router.state.available_models = orig_available_models
+
+
 @pytest.fixture(scope="session")
 def app():
     """Импортируем FastAPI-приложение router'а (один раз на сессию)."""
@@ -81,22 +142,3 @@ def sample_messages(sample_coordinator_prompt) -> list:
         {"role": "system", "content": sample_coordinator_prompt},
         {"role": "user", "content": "Сделай код-ревью текущих изменений"},
     ]
-
-
-@pytest.fixture
-def tmp_config(tmp_path) -> Path:
-    """Временная копия routing.json для тестов, не трогает реальный файл."""
-    src = Path(__file__).parent.parent / "routing.json"
-    if src.exists():
-        data = json.loads(src.read_text(encoding="utf-8"))
-    else:
-        data = {
-            "agent_to_worker_mapping": {
-                "coordinator": "z-ai/glm-5.2",
-                "default_worker": "deepseek/deepseek-v4-flash",
-            },
-            "enable_auto_routing": True,
-        }
-    dst = tmp_path / "routing.json"
-    dst.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    return dst

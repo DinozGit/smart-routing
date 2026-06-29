@@ -117,29 +117,49 @@ def get_role_config(role_name: str) -> dict:
 
 
 def get_role_default_model(role_name: str) -> str | None:
-    """Возвращает default_model роли или None."""
+    """
+    Возвращает default_model роли.
+    Приоритет: routing.json → config.yaml.
+    """
+    # 1. Сначала смотрим в runtime-конфиге (routing.json)
+    role_models = state.config.get("role_models", {})
+    if role_name in role_models and role_models[role_name] != "auto":
+        return role_models[role_name]
+    # 2. Fallback в config.yaml
     role = get_role_config(role_name)
     return role.get("default_model")
 
 
 def get_role_fallback_model(role_name: str) -> str | None:
-    """Возвращает fallback_model роли или None."""
+    """
+    Возвращает fallback-модель для роли.
+    Если fallback_model указан в config.yaml — использует его.
+    Иначе вычисляет автоматически по правилу:
+      coordinator    -> worker_default.default_model
+      worker_default -> coordinator.default_model
+      worker_img     -> worker_default.default_model
+    """
     role = get_role_config(role_name)
-    return role.get("fallback_model")
+    explicit = role.get("fallback_model")
+    if explicit:
+        return explicit
+    auto_map = {
+        "coordinator": "worker_default",
+        "worker_default": "coordinator",
+        "worker_img": "worker_default",
+    }
+    fallback_role = auto_map.get(role_name)
+    if fallback_role:
+        return get_role_default_model(fallback_role)
+    return None
 
 
 class RouterState:
     def __init__(self):
         self.config_file = Path(__file__).parent / "routing.json"
-        self.config = {
-            "agent_to_worker_mapping": {
-                "database": "deepseek/deepseek-v4-flash",
-                "frontend": "qwen/qwen3-coder-next",
-                "coordinator": "deepseek/deepseek-v4-pro",
-            },
-            "default_worker": "deepseek/deepseek-v4-flash",
-            "enable_auto_routing": True,
-        }
+        self.models_cache_file = Path(__file__).parent / "models_cache.json"
+        # ЕДИНСТВЕННЫЙ источник runtime-конфига — routing.json
+        self.config = {}
         self.stats = {
             "requests": 0,
             "total_input": 0,
@@ -153,11 +173,16 @@ class RouterState:
         }
         self.quota = {"last_check": 0, "is_ok": True}
         self.config_lock = asyncio.Lock()  # Защита от конкурентной записи файла
+        self.models_lock = asyncio.Lock()  # Защита models_cache.json
         # Провайдеры в runtime (из config.yaml)
         self.providers = cfg.get("providers", {})
         self._active_provider = self._determine_active_provider()
+        # Кеш моделей из провайдера (RouterAI API)
+        self.available_models: Dict[str, dict] = {}  # model_id → info
+        self._models_last_sync: float | None = None
 
         self._load_config()
+        self._load_models_cache()
 
     def _determine_active_provider(self) -> str:
         """Определяет дефолтный провайдер из конфига."""
@@ -179,13 +204,143 @@ class RouterState:
         return provider.get("api_key_env", "ROUTERAI_KEY")
 
     def _load_config(self):
+        """
+        Загружает runtime-конфиг из routing.json.
+        Если файла нет — создаёт его с дефолтами из config.yaml.
+        """
         if self.config_file.exists():
             try:
                 with open(self.config_file, "r", encoding="utf-8") as f:
-                    self.config.update(json.load(f))
+                    loaded = json.load(f)
+                self.config = loaded
                 logger.info(f"✅ Загружена конфигурация из {self.config_file}")
             except Exception as e:
                 logger.error(f"Ошибка загрузки {self.config_file}: {e}")
+                self._init_default_config()
+        else:
+            self._init_default_config()
+            # Сохраняем дефолтный конфиг на диск
+            self._sync_write_config(self.config_file, self.config)
+            logger.info(f"📝 Создан дефолтный {self.config_file}")
+
+    def _init_default_config(self):
+        """Заполняет self.config дефолтами из config.yaml."""
+        coord_model = (
+            get_role_default_model("coordinator") or "deepseek/deepseek-v4-pro"
+        )
+        worker_model = (
+            get_role_default_model("worker_default") or "deepseek/deepseek-v4-flash"
+        )
+        img_model = get_role_default_model("worker_img") or "qwen/qwen3-coder-next"
+        self.config = {
+            "role_models": {
+                "coordinator": coord_model,
+                "worker_default": worker_model,
+                "worker_img": img_model,
+            },
+            "agent_to_worker_mapping": {
+                "database": "auto",
+                "tests": "auto",
+                "bot": "auto",
+                "api": "auto",
+                "services": "auto",
+                "devops": "auto",
+                "frontend": "auto",
+                "mobile": "auto",
+                "design": "auto",
+            },
+            "default_worker": worker_model,
+            "enable_auto_routing": True,
+        }
+
+    def _load_models_cache(self):
+        """Загружает кеш моделей из models_cache.json."""
+        if self.models_cache_file.exists():
+            try:
+                with open(self.models_cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.available_models = {}
+                for m in data.get("models", []):
+                    self.available_models[m["id"]] = m
+                self._models_last_sync = data.get("last_sync")
+                logger.info(
+                    f"📦 Загружено {len(self.available_models)} моделей из кеша"
+                )
+            except Exception as e:
+                logger.error(f"Ошибка загрузки models_cache.json: {e}")
+                self.available_models = {}
+
+    def get_model_info(self, model_id: str) -> dict | None:
+        """Возвращает информацию о модели из кеша или None."""
+        return self.available_models.get(model_id)
+
+    def get_all_available_models(self) -> list:
+        """Возвращает список всех моделей из кеша."""
+        return sorted(
+            self.available_models.values(),
+            key=lambda m: m.get("name", m["id"]),
+        )
+
+    async def sync_models_from_provider(self) -> dict:
+        """Синхронизирует список моделей из RouterAI API."""
+        provider = self.providers.get("routerai", {})
+        endpoint = provider.get("models_endpoint", "")
+        if not endpoint:
+            raise ValueError("models_endpoint не настроен для routerai")
+
+        async with self.models_lock:
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.get(endpoint)
+                    resp.raise_for_status()
+                    data = resp.json()
+            except Exception as e:
+                logger.error(f"Ошибка синхронизации моделей с RouterAI: {e}")
+                raise
+
+            raw_models = data.get("data", [])
+            self.available_models = {}
+            for m in raw_models:
+                pricing = m.get("pricing", {})
+                # RouterAI: ₽ за 1 токен → ₽ за 1M токенов
+                inp = round(pricing.get("prompt", 0) * 1_000_000, 4)
+                out = round(pricing.get("completion", 0) * 1_000_000, 4)
+                self.available_models[m["id"]] = {
+                    "id": m["id"],
+                    "name": m.get("name", m["id"]),
+                    "description": m.get("description", ""),
+                    "context_length": m.get("context_length", 0),
+                    "input_price_1m": inp,
+                    "output_price_1m": out,
+                    "supported_parameters": m.get("supported_parameters", []),
+                    "input_modalities": m.get("architecture", {}).get(
+                        "input_modalities", ["text"]
+                    ),
+                    "output_modalities": m.get("architecture", {}).get(
+                        "output_modalities", ["text"]
+                    ),
+                }
+
+            now = time.time()
+            self._models_last_sync = now
+            cache_data = {
+                "models": list(self.available_models.values()),
+                "last_sync": now,
+                "provider": "routerai",
+            }
+            await asyncio.to_thread(
+                lambda: self.models_cache_file.write_text(
+                    json.dumps(cache_data, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            )
+            logger.info(
+                f"🔄 Синхронизировано {len(self.available_models)} моделей из RouterAI"
+            )
+            return {
+                "synced": len(self.available_models),
+                "last_sync": now,
+            }
 
     async def save_config(self, new_config: dict):
         async with self.config_lock:
@@ -343,7 +498,17 @@ def log_usage(model: str, input_tokens: int, output_tokens: int):
     state.stats["total_input"] += input_tokens
     state.stats["total_output"] += output_tokens
 
-    price_info = PRICES.get(model, {"input": 0.50, "output": 1.50, "role": "Unknown"})
+    price_info = PRICES.get(model)
+    if not price_info:
+        cm = state.get_model_info(model)
+        if cm:
+            price_info = {
+                "input": cm["input_price_1m"],
+                "output": cm["output_price_1m"],
+                "role": "Unknown",
+            }
+    if not price_info:
+        price_info = {"input": 0.50, "output": 1.50, "role": "Unknown"}
     cost = (
         input_tokens * price_info["input"] + output_tokens * price_info["output"]
     ) / 1_000_000
@@ -645,7 +810,9 @@ def smart_route_model(
     if system_prompt and len(system_prompt) < COORDINATOR_PROMPT_THRESHOLD:
         fp = fingerprint_system_prompt(system_prompt)
         if not fp:
-            default = state.config.get("default_worker", "deepseek/deepseek-v4-flash")
+            default = state.config.get("default_worker") or get_role_default_model(
+                "worker_default"
+            )
             return default, "worker_default", "Sub-agent (default_worker)"
 
     # 3. Проверка явного тега [AGENT:name] в последнем user-сообщении
@@ -698,14 +865,21 @@ def smart_route_model(
                     scores[category] += 1
 
         if scores["flash"] >= HEURISTIC_THRESHOLD and scores["qwen"] == 0:
+            model = (
+                get_role_default_model("worker_default")
+                or state.config["default_worker"]
+            )
             return (
-                "deepseek/deepseek-v4-flash",
+                model,
                 "worker_default",
                 f"Авто-маршрутизация (flash: {scores['flash']})",
             )
         if scores["qwen"] >= HEURISTIC_THRESHOLD and scores["flash"] == 0:
+            model = (
+                get_role_default_model("worker_img") or state.config["default_worker"]
+            )
             return (
-                "qwen/qwen3-coder-next",
+                model,
                 "worker_img",
                 f"Авто-маршрутизация (qwen: {scores['qwen']})",
             )
@@ -743,7 +917,10 @@ async def shutdown_event():
 async def list_models():
     """OpenAI-compatible model list (требуется Zed при подключении)."""
     models_list = []
+    seen = set()
+    # 1. Модели из config.yaml (baseline)
     for model_name, model_cfg in cfg.get("models", {}).items():
+        seen.add(model_name)
         models_list.append(
             {
                 "id": model_name,
@@ -752,7 +929,39 @@ async def list_models():
                 "owned_by": model_cfg.get("provider", "SmartRouter"),
             }
         )
+    # 2. Модели из кеша RouterAI (дополнение, без дубликатов)
+    for m in state.get_all_available_models():
+        if m["id"] not in seen:
+            models_list.append(
+                {
+                    "id": m["id"],
+                    "object": "model",
+                    "created": 1700000000,
+                    "owned_by": "RouterAI",
+                }
+            )
     return {"object": "list", "data": models_list}
+
+
+@app.get("/models/available")
+async def get_available_models(refresh: bool = Query(False)):
+    if refresh:
+        await state.sync_models_from_provider()
+    return {
+        "models": state.get_all_available_models(),
+        "last_sync": state._models_last_sync,
+    }
+
+
+@app.post("/models/sync")
+async def sync_models():
+    try:
+        result = await state.sync_models_from_provider()
+        return {"status": "ok", **result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Sync failed: {e}")
 
 
 @app.get("/health")
@@ -800,7 +1009,7 @@ async def get_roles():
             "name": role_cfg.get("name", role_name),
             "description": role_cfg.get("description", ""),
             "default_model": role_cfg.get("default_model", ""),
-            "fallback_model": role_cfg.get("fallback_model", ""),
+            "fallback_model": get_role_fallback_model(role_name) or "",
             "agents": role_cfg.get("agents", []),
             "capabilities": role_cfg.get("capabilities", {}),
         }

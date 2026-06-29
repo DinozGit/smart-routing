@@ -35,10 +35,9 @@ class TestRolesConfig:
         assert "worker_img" in ROLES_CFG
 
     def test_role_has_required_fields(self):
-        """Каждая роль имеет default_model, fallback_model, agents."""
+        """Каждая роль имеет default_model, agents."""
         for role_name, role_cfg in ROLES_CFG.items():
             assert "default_model" in role_cfg, f"{role_name} missing default_model"
-            assert "fallback_model" in role_cfg, f"{role_name} missing fallback_model"
             assert "agents" in role_cfg, f"{role_name} missing agents"
             assert isinstance(role_cfg["agents"], list)
             assert len(role_cfg["agents"]) > 0
@@ -88,7 +87,8 @@ class TestRoleModels:
     def test_coordinator_default_model(self):
         model = get_role_default_model("coordinator")
         assert model is not None
-        assert "glm" in model.lower() or "pro" in model.lower()
+        assert "pro" in model.lower(), f"Coordinator should be Pro, got {model}"
+        assert "glm" not in model.lower(), f"Coordinator should not be GLM, got {model}"
 
     def test_worker_default_model(self):
         model = get_role_default_model("worker_default")
@@ -111,6 +111,30 @@ class TestRoleModels:
             default = get_role_default_model(role)
             fallback = get_role_fallback_model(role)
             assert default != fallback, f"{role}: default == fallback ({default})"
+
+    def test_coordinator_fallback_is_worker_default(self):
+        """Coordinator fallback = worker_default.default_model (auto)."""
+        fb = get_role_fallback_model("coordinator")
+        worker_default = get_role_default_model("worker_default")
+        assert fb == worker_default, (
+            f"Coordinator fallback should be {worker_default}, got {fb}"
+        )
+
+    def test_worker_default_fallback_is_coordinator(self):
+        """Worker_default fallback = coordinator.default_model (auto)."""
+        fb = get_role_fallback_model("worker_default")
+        coord = get_role_default_model("coordinator")
+        assert fb == coord, (
+            f"Worker_default fallback should be {coord}, got {fb}"
+        )
+
+    def test_worker_img_fallback_is_worker_default(self):
+        """Worker_img fallback = worker_default.default_model (auto)."""
+        fb = get_role_fallback_model("worker_img")
+        worker_default = get_role_default_model("worker_default")
+        assert fb == worker_default, (
+            f"Worker_img fallback should be {worker_default}, got {fb}"
+        )
 
     def test_unknown_role_returns_none(self):
         assert get_role_default_model("nonexistent") is None

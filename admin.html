@@ -402,6 +402,9 @@
             >
                 🔌 Providers
             </div>
+            <div class="tab" data-tab="models" onclick="switchTab('models')">
+                📦 Models
+            </div>
         </div>
 
         <!-- TAB: Logs -->
@@ -513,7 +516,43 @@
             >
                 💾 Save Configuration
             </button>
+            <button
+                class="btn btn-primary"
+                id="btn-test-config"
+                onclick="testConfig()"
+                style="margin-left: 8px"
+            >
+                🧪 Test Routing
+            </button>
             <div id="save-status" class="save-status"></div>
+            <div
+                id="test-result"
+                class="config-card"
+                style="display: none; margin-top: 16px"
+            >
+                <div class="config-title">🧪 Routing Test Result</div>
+                <div
+                    id="test-result-body"
+                    style="font-size: 13px; color: #c9d1d9"
+                ></div>
+            </div>
+            <div class="config-card" style="margin-top: 16px">
+                <div class="config-title">📋 Current Runtime Config</div>
+                <pre
+                    id="current-config-display"
+                    style="
+                        font-size: 12px;
+                        color: #c9d1d9;
+                        max-height: 200px;
+                        overflow-y: auto;
+                        margin: 0;
+                        padding: 8px;
+                        background: #0d1117;
+                        border-radius: 6px;
+                    "
+                >
+Loading...</pre>
+            </div>
         </div>
 
         <!-- TAB: Providers -->
@@ -615,6 +654,47 @@
             </div>
         </div>
 
+        <!-- TAB: Models -->
+        <div id="tab-models" class="tab-content">
+            <div class="config-card">
+                <div class="config-title">
+                    Models
+                    <button
+                        class="btn btn-primary"
+                        onclick="syncModels()"
+                        style="float: right; font-size: 12px; padding: 4px 12px"
+                    >
+                        Sync from RouterAI
+                    </button>
+                </div>
+                <div
+                    id="models-sync-status"
+                    class="save-status"
+                    style="margin-bottom: 12px"
+                ></div>
+                <div style="max-height: 60vh; overflow-y: auto">
+                    <table class="agent-table" style="width: 100%">
+                        <thead>
+                            <tr>
+                                <th>Model ID</th>
+                                <th>Context</th>
+                                <th>Input /1M</th>
+                                <th>Output /1M</th>
+                                <th>Modality</th>
+                            </tr>
+                        </thead>
+                        <tbody id="models-list-body"></tbody>
+                    </table>
+                </div>
+                <div
+                    style="font-size: 11px; color: #8b949e; margin-top: 8px"
+                    id="models-last-sync"
+                >
+                    Last sync: never
+                </div>
+            </div>
+        </div>
+
         <script>
             // ========== State ==========
             let currentLevel = "INFO";
@@ -636,7 +716,11 @@
                     .forEach((t) =>
                         t.classList.toggle("active", t.id === "tab-" + name),
                     );
-                if (name === "agents") loadAgentConfig();
+                if (name === "agents") {
+                    loadAgentConfig();
+                    displayCurrentConfig();
+                }
+                if (name === "models") loadModelsList();
             }
 
             // ========== Config API ==========
@@ -679,8 +763,7 @@
                     // Worker Img select — по умолчанию из роли
                     setSelectValue(
                         "model-worker-img",
-                        rolesConfig["worker_img"]?.default_model ||
-                            "qwen/qwen3-coder-next",
+                        rolesConfig["worker_img"]?.default_model || "auto",
                     );
                 } catch (e) {
                     console.error("Failed to load roles:", e);
@@ -689,35 +772,27 @@
             }
 
             function renderAgentConfig() {
+                const roleModels = currentConfig.role_models || {};
                 const mapping = currentConfig.agent_to_worker_mapping || {};
                 const models = getModelOptionsHtml();
 
-                // Update selects
                 setSelectValue(
                     "model-coordinator",
-                    mapping.coordinator || "auto",
+                    roleModels.coordinator || "",
                 );
                 setSelectValue(
                     "model-default-worker",
-                    currentConfig.default_worker ||
-                        "deepseek/deepseek-v4-flash",
+                    roleModels.worker_default || "",
                 );
-                // Worker Img: из mapping.frontend (legacy) или из роли
-                const workerImgModel =
-                    mapping.frontend ||
-                    rolesConfig["worker_img"]?.default_model ||
-                    "qwen/qwen3-coder-next";
-                setSelectValue("model-worker-img", workerImgModel);
+                setSelectValue("model-worker-img", roleModels.worker_img || "");
                 document.getElementById("toggle-auto-routing").checked =
                     currentConfig.enable_auto_routing !== false;
 
-                // Agent mapping table — показываем ВСЕХ агентов (10 шт),
-                // даже если их нет в routing.json (тогда «auto» → role default)
+                // Agent mapping table — 9 sub-agents
                 const agentTable =
                     document.getElementById("agent-mapping-body");
                 agentTable.innerHTML = "";
-                const allAgents = [
-                    { name: "coordinator", icon: "🧠", role: "coordinator" },
+                const subAgents = [
                     { name: "database", icon: "🗄️", role: "worker_default" },
                     { name: "tests", icon: "🧪", role: "worker_default" },
                     { name: "bot", icon: "🤖", role: "worker_default" },
@@ -728,12 +803,35 @@
                     { name: "mobile", icon: "📱", role: "worker_img" },
                     { name: "design", icon: "🎨", role: "worker_img" },
                 ];
-                for (const { name: agent, icon, role } of allAgents) {
-                    if (agent === "coordinator") continue; // has its own select
+                for (const { name: agent, icon, role } of subAgents) {
                     const mappedModel = mapping[agent] || "auto";
+                    let displayModel = mappedModel;
+                    if (mappedModel === "auto") {
+                        const m = (roleModels[role] || "?")
+                            .replace("deepseek/", "")
+                            .replace("qwen/", "");
+                        displayModel = "auto (" + m + ")";
+                    } else {
+                        displayModel = mappedModel
+                            .replace("deepseek/", "")
+                            .replace("qwen/", "");
+                    }
                     const tr = document.createElement("tr");
-                    tr.innerHTML = `<td>${icon} ${agent.charAt(0).toUpperCase() + agent.slice(1)}<br><span style="font-size:10px;color:#8b949e">${role}</span></td>
-      <td><select data-agent="${agent}" onchange="onAgentChange(this)">${models}</select></td>`;
+                    tr.innerHTML =
+                        "<td>" +
+                        icon +
+                        " " +
+                        agent.charAt(0).toUpperCase() +
+                        agent.slice(1) +
+                        '<br><span style="font-size:10px;color:#8b949e">' +
+                        role +
+                        '</span></td><td><select data-agent="' +
+                        agent +
+                        '" onchange="onAgentChange(this)">' +
+                        models +
+                        '</select> <span style="font-size:10px;color:#58a6ff">-> ' +
+                        displayModel +
+                        "</span></td>";
                     tr.querySelector("select").value = mappedModel;
                     agentTable.appendChild(tr);
                 }
@@ -768,19 +866,17 @@
                 btn.textContent = "⏳ Saving...";
                 saveStatus.className = "save-status";
 
-                const coordinatorModel =
-                    document.getElementById("model-coordinator").value;
-                const defaultWorker = document.getElementById(
-                    "model-default-worker",
-                ).value;
-                const workerImgModel =
-                    document.getElementById("model-worker-img").value;
-
-                // Coordinator: значение из UI (auto или конкретная модель)
-                const mapping = {
-                    coordinator: coordinatorModel,
-                    frontend: workerImgModel,
+                const roleModels = {
+                    coordinator:
+                        document.getElementById("model-coordinator").value,
+                    worker_default: document.getElementById(
+                        "model-default-worker",
+                    ).value,
+                    worker_img:
+                        document.getElementById("model-worker-img").value,
                 };
+
+                const mapping = {};
                 document
                     .querySelectorAll("#agent-mapping-body select[data-agent]")
                     .forEach((sel) => {
@@ -788,8 +884,8 @@
                     });
 
                 const newConfig = {
+                    role_models: roleModels,
                     agent_to_worker_mapping: mapping,
-                    default_worker: defaultWorker,
                     enable_auto_routing: document.getElementById(
                         "toggle-auto-routing",
                     ).checked,
@@ -805,11 +901,8 @@
                     const result = await resp.json();
                     currentConfig = result.config;
                     saveStatus.className = "save-status ok";
-                    saveStatus.textContent =
-                        "✅ Configuration saved! Updated " +
-                        Object.keys(result.config.agent_to_worker_mapping || {})
-                            .length +
-                        " agents.";
+                    saveStatus.textContent = "✅ Configuration saved!";
+                    displayCurrentConfig();
                 } catch (e) {
                     saveStatus.className = "save-status err";
                     saveStatus.textContent = "❌ Error: " + e.message;
@@ -916,9 +1009,195 @@
                     .catch(() => {});
             }
 
+            // ========== Test Routing ==========
+            async function testConfig() {
+                const btn = document.getElementById("btn-test-config");
+                const resultDiv = document.getElementById("test-result");
+                const body = document.getElementById("test-result-body");
+                btn.disabled = true;
+                btn.textContent = "⏳ Testing...";
+                resultDiv.style.display = "block";
+                body.innerHTML =
+                    "<span style='color:#8b949e'>Sending test request...</span>";
+
+                const testPayload = {
+                    model: "SmartAuto",
+                    messages: [
+                        {
+                            role: "system",
+                            content:
+                                "You are the Zed coding agent. Coordinator (главный агент).",
+                        },
+                        {
+                            role: "user",
+                            content:
+                                "[AGENT:database] Test routing — simple query",
+                        },
+                    ],
+                    stream: false,
+                    max_tokens: 50,
+                };
+
+                const startTime = Date.now();
+                try {
+                    const resp = await fetch("/v1/chat/completions", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(testPayload),
+                    });
+                    const elapsed = Date.now() - startTime;
+                    const data = await resp.json();
+
+                    if (resp.ok) {
+                        const model = data.model || "?";
+                        const usage = data.usage || {};
+                        body.innerHTML = [
+                            "<div style='color:#3fb950;font-weight:600;margin-bottom:8px'>Success</div>",
+                            "<div><b>Model used:</b> <span style='color:#79c0ff'>" +
+                                model +
+                                "</span></div>",
+                            "<div><b>Prompt tokens:</b> " +
+                                (usage.prompt_tokens || "?") +
+                                "</div>",
+                            "<div><b>Completion tokens:</b> " +
+                                (usage.completion_tokens || "?") +
+                                "</div>",
+                            "<div><b>Latency:</b> " + elapsed + "ms</div>",
+                            "<div><b>Content:</b> " +
+                                JSON.stringify(
+                                    data.choices?.[0]?.message?.content?.substring(
+                                        0,
+                                        200,
+                                    ) || "?",
+                                ) +
+                                "</div>",
+                        ].join("");
+                    } else {
+                        body.innerHTML =
+                            "<div style='color:#f85149'><b>Error:</b> " +
+                            (data.detail || resp.status) +
+                            "</div>";
+                    }
+                } catch (e) {
+                    body.innerHTML =
+                        "<div style='color:#f85149'><b>Connection error:</b> " +
+                        e.message +
+                        "</div>";
+                }
+                btn.disabled = false;
+                btn.textContent = "🧪 Test Routing";
+            }
+
+            function displayCurrentConfig() {
+                fetch("/config")
+                    .then((r) => r.json())
+                    .then((cfg) => {
+                        document.getElementById(
+                            "current-config-display",
+                        ).textContent = JSON.stringify(cfg, null, 2);
+                        currentConfig = cfg;
+                    })
+                    .catch(() => {
+                        document.getElementById(
+                            "current-config-display",
+                        ).textContent = "Failed to load";
+                    });
+            }
+
             // ========== Init ==========
             // "auto" = fingerprinting (не принудительно)
             availableModels = ["auto"];
+            // ========== Models Tab ==========
+            function loadModelsList() {
+                fetch("/models/available")
+                    .then((r) => r.json())
+                    .then((data) => {
+                        const tbody =
+                            document.getElementById("models-list-body");
+                        const models = data.models || [];
+                        if (models.length === 0) {
+                            tbody.innerHTML =
+                                '<tr><td colspan="5" style="color:#8b949e;text-align:center">No models cached. Click "Sync from RouterAI"</td></tr>';
+                        } else {
+                            tbody.innerHTML = models
+                                .map((m) => {
+                                    const mod = (m.input_modalities || []).join(
+                                        ", ",
+                                    );
+                                    const ctx = m.context_length
+                                        ? m.context_length >= 1000000
+                                            ? (
+                                                  m.context_length / 1000000
+                                              ).toFixed(1) + "M"
+                                            : (m.context_length / 1000).toFixed(
+                                                  0,
+                                              ) + "K"
+                                        : "-";
+                                    return (
+                                        "<tr>" +
+                                        "<td style='font-size:12px'>" +
+                                        m.id +
+                                        "</td>" +
+                                        "<td>" +
+                                        ctx +
+                                        "</td>" +
+                                        "<td>" +
+                                        (m.input_price_1m || 0).toFixed(2) +
+                                        "</td>" +
+                                        "<td>" +
+                                        (m.output_price_1m || 0).toFixed(2) +
+                                        "</td>" +
+                                        "<td>" +
+                                        mod +
+                                        "</td>" +
+                                        "</tr>"
+                                    );
+                                })
+                                .join("");
+                        }
+                        const ls = data.last_sync
+                            ? new Date(data.last_sync * 1000).toLocaleString()
+                            : "never";
+                        document.getElementById(
+                            "models-last-sync",
+                        ).textContent = "Last sync: " + ls;
+                    })
+                    .catch(() => {
+                        document.getElementById("models-list-body").innerHTML =
+                            '<tr><td colspan="5" style="color:#f85149;text-align:center">Failed to load models</td></tr>';
+                    });
+            }
+
+            async function syncModels() {
+                const statusEl = document.getElementById("models-sync-status");
+                statusEl.className = "save-status";
+                statusEl.textContent = "Syncing...";
+                try {
+                    const resp = await fetch("/models/sync", {
+                        method: "POST",
+                    });
+                    const data = await resp.json();
+                    if (resp.ok) {
+                        statusEl.className = "save-status ok";
+                        statusEl.textContent =
+                            "Synced " + data.synced + " models from RouterAI";
+                        loadModelsList();
+                        // Also refresh model dropdowns
+                        initModels();
+                        displayCurrentConfig();
+                    } else {
+                        statusEl.className = "save-status err";
+                        statusEl.textContent =
+                            "Sync failed: " + (data.detail || "unknown");
+                    }
+                } catch (e) {
+                    statusEl.className = "save-status err";
+                    statusEl.textContent = "Sync failed: " + e.message;
+                }
+                setTimeout(() => {
+                    statusEl.className = "save-status";
+                }, 5000);
+            }
 
             // Load models from API + populate dropdowns
             async function initModels() {
@@ -937,15 +1216,18 @@
                         "Could not load models from API, using defaults",
                     );
                     // Fallback defaults
-                    [
-                        "deepseek/deepseek-v4-pro",
-                        "deepseek/deepseek-v4-flash",
-                        "qwen/qwen3-coder-next",
-                    ].forEach((m) => {
-                        if (!availableModels.includes(m)) {
-                            availableModels.push(m);
-                        }
-                    });
+                    // Fallback: load from /roles if API failed
+                    try {
+                        const r2 = await fetch("/roles");
+                        const d2 = await r2.json();
+                        Object.values(d2.roles || {}).forEach((r) => {
+                            [r.default_model, r.fallback_model].forEach((m) => {
+                                if (m && !availableModels.includes(m)) {
+                                    availableModels.push(m);
+                                }
+                            });
+                        });
+                    } catch (e2) {}
                 }
                 // Populate all selects
                 const modelOpts = getModelOptionsHtml();
@@ -959,6 +1241,7 @@
             }
 
             initModels();
+            displayCurrentConfig();
             fetchLogs();
             loadProviders();
 

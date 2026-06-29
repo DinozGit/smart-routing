@@ -1,6 +1,19 @@
 {
+  "role_models": {
+    "coordinator": "deepseek/deepseek-v4-pro",
+    "worker_default": "deepseek/deepseek-v4-flash",
+    "worker_img": "qwen/qwen3-coder-next"
+  },
   "agent_to_worker_mapping": {
-    "coordinator": "z-ai/glm-5.2"
+    "database": "auto",
+    "tests": "auto",
+    "bot": "auto",
+    "api": "auto",
+    "services": "auto",
+    "devops": "auto",
+    "frontend": "auto",
+    "mobile": "auto",
+    "design": "auto"
   },
   "default_worker": "deepseek/deepseek-v4-flash",
   "enable_auto_routing": true

@@ -48,12 +48,10 @@ class TestConfig:
         assert resp.status_code == 200
         data = resp.json()
         assert "config" in data
-        # Возвращаем как было
-        await client.post(
-            "/config",
-            json={
-                "agent_to_worker_mapping": {"coordinator": "z-ai/glm-5.2"},
-            },
+        # Проверяем, что сохранённое значение = отправленное
+        assert (
+            data["config"]["agent_to_worker_mapping"]["coordinator"]
+            == "deepseek/deepseek-v4-pro"
         )
 
     async def test_config_post_invalid(self, client):
@@ -68,3 +66,10 @@ class TestConfig:
         resp = await client.get("/config")
         data = resp.json()
         assert data["default_worker"] != ""
+
+    async def test_config_coordinator_not_glm(self, client):
+        """Coordinator не должен быть GLM (проверка что тесты не портят конфиг)."""
+        resp = await client.get("/config")
+        data = resp.json()
+        coord = data.get("agent_to_worker_mapping", {}).get("coordinator", "")
+        assert "glm" not in coord.lower(), f"Coordinator is GLM: {coord}"

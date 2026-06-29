@@ -122,9 +122,9 @@ class TestFallbackChain:
         )
         assert resp.status_code == 200
         assert call_count == 2  # primary + fallback
-        # Первая модель — flash (worker_default), вторая — fallback (glm)
+        # Первая модель — flash (worker_default), вторая — fallback (pro)
         assert "flash" in models_used[0].lower()
-        assert "glm" in models_used[1].lower()
+        assert "pro" in models_used[1].lower()
 
     async def test_4xx_no_fallback(self, client, monkeypatch, mock_429_response):
         """4xx от primary → fallback НЕ происходит."""

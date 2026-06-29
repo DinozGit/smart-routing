@@ -616,6 +616,10 @@ class SkillEngine:
 - [x] **🔴 P0: Дехардкод Coordinator fallback** (Step 1.4, commit 1cfa15b)
 - [x] **🔴 P0: Рефакторинг на 3 роли (Coordinator / Worker / Worker Img)** (Step 2.1, commit 0f3359f)
 - [x] **🔴 P0: Fallback chain между ролями** (Step 2.2, commit 9263a2b)
+- [x] **🟠 P1: Phase 2.5 — Управление моделями через админку** (models_cache.json, sync RouterAI API, вкладка Models, кнопка Test Routing)
+- [x] **🟠 P1: Phase 2.6 — Дехардкод: единый источник правды** (routing.json role_models, авто-fallback, изоляция тестов conftest)
+- [x] **🧪 Phase 2: 61 тест (roles, fallback, ports, models)**
+- [x] **📊 Итого: 143 теста, все зелёные**
 - [ ] 🟠 P1: Fine tuning в админке (параметры + промпты)
 - [ ] 🟠 P1: Динамические цены моделей
 - [x] 🟠 P1: Разделение портов (Step 2.3, commit b927094)
