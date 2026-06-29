@@ -618,7 +618,7 @@ class SkillEngine:
 - [x] **🔴 P0: Fallback chain между ролями** (Step 2.2, commit 9263a2b)
 - [ ] 🟠 P1: Fine tuning в админке (параметры + промпты)
 - [ ] 🟠 P1: Динамические цены моделей
-- [x] 🟠 P1: Разделение портов (Step 2.3, commit pending)
+- [x] 🟠 P1: Разделение портов (Step 2.3, commit b927094)
 - [ ] 🟡 P2: Provider failover
 - [ ] 🟡 P2: Docker
 - [ ] 🟢 P3: Smart Router v2 — Agent Framework
