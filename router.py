@@ -368,74 +368,134 @@ def fingerprint_system_prompt(system_prompt: str) -> Tuple[str, int] | None:
 # задачи от Coordinator с write scope, файлами и responsibilities.
 AGENT_SCOPE_PATTERNS = {
     "database": [
+        # Технические маркеры
         (re.compile(r"database/\*\.py", re.IGNORECASE), 12),
-        (re.compile(r"SQLAlchemy\s+models", re.IGNORECASE), 10),
+        (re.compile(r"SQLAlchemy", re.IGNORECASE), 8),
         (re.compile(r"alembic/versions?/\*\.py", re.IGNORECASE), 10),
-        (re.compile(r"CRUD\s+operations?", re.IGNORECASE), 8),
+        (re.compile(r"CRUD", re.IGNORECASE), 8),
         (re.compile(r"alembic\.ini", re.IGNORECASE), 6),
         (re.compile(r"migrations", re.IGNORECASE), 5),
+        # Естественный язык
+        (re.compile(r"миграц|migration", re.IGNORECASE), 8),
+        (re.compile(r"таблиц|CREATE\s+TABLE", re.IGNORECASE), 7),
+        (re.compile(r"модел[ьиыо]", re.IGNORECASE), 6),
+        (re.compile(r"\bSQL\b|\bORM\b", re.IGNORECASE), 5),
     ],
     "tests": [
+        # Технические маркеры
         (re.compile(r"tests?/\*\.py", re.IGNORECASE), 12),
         (re.compile(r"Pytest\s+unit.*integration", re.IGNORECASE), 10),
         (re.compile(r"Write\s+scope.*tests?/", re.IGNORECASE), 10),
         (re.compile(r"\bpytest\b", re.IGNORECASE), 6),
         (re.compile(r"unit.*integration.*tests?", re.IGNORECASE), 6),
+        # Естественный язык
+        (re.compile(r"напиши\s+тест|write\s+test", re.IGNORECASE), 9),
+        (re.compile(r"покрыт|coverage", re.IGNORECASE), 8),
+        (re.compile(r"\bassert\b|\bmock\b", re.IGNORECASE), 5),
     ],
     "bot": [
+        # Технические маркеры
         (re.compile(r"handlers/\*\.py", re.IGNORECASE), 12),
         (re.compile(r"aiogram\s+handlers", re.IGNORECASE), 10),
         (re.compile(r"FSM\s+states", re.IGNORECASE), 8),
         (re.compile(r"inline\s+keyboards", re.IGNORECASE), 8),
         (re.compile(r"keyboards?\.py", re.IGNORECASE), 7),
+        # Естественный язык
+        (re.compile(r"\bбот[а-я]*|\btelegram\b", re.IGNORECASE), 8),
+        (re.compile(r"handler|обработчик", re.IGNORECASE), 6),
+        (re.compile(r"клавиатур|keyboard", re.IGNORECASE), 7),
+        (re.compile(r"\baiogram\b", re.IGNORECASE), 7),
+        (re.compile(r"\binline\b", re.IGNORECASE), 6),
     ],
     "devops": [
+        # Технические маркеры
         (re.compile(r"Dockerfile", re.IGNORECASE), 12),
         (re.compile(r"docker-compose.*\.yml", re.IGNORECASE), 10),
         (re.compile(r"nginx.*\.conf", re.IGNORECASE), 10),
         (re.compile(r"\.github/workflows?", re.IGNORECASE), 10),
         (re.compile(r"CI/CD.*Nginx.*SSL", re.IGNORECASE), 8),
+        # Естественный язык
+        (re.compile(r"деплой|deploy", re.IGNORECASE), 7),
+        (re.compile(r"контейнер|docker", re.IGNORECASE), 6),
+        (re.compile(r"сертификат|certbot|SSL", re.IGNORECASE), 6),
+        (re.compile(r"\bnginx\b", re.IGNORECASE), 8),
     ],
     "api": [
+        # Технические маркеры
         (re.compile(r"api/\*\.py", re.IGNORECASE), 12),
         (re.compile(r"schemas?\.py", re.IGNORECASE), 10),
         (re.compile(r"middleware\.py", re.IGNORECASE), 8),
         (re.compile(r"FastAPI\s+endpoints", re.IGNORECASE), 10),
         (re.compile(r"Pydantic\s+schemas", re.IGNORECASE), 8),
         (re.compile(r"JWT\s+middleware", re.IGNORECASE), 6),
+        # Естественный язык
+        (re.compile(r"эндпоинт|endpoint", re.IGNORECASE), 8),
+        (re.compile(r"роут|route|@app\.", re.IGNORECASE), 7),
+        (re.compile(r"\bfastapi\b", re.IGNORECASE), 7),
+        (re.compile(r"\bpydantic\b", re.IGNORECASE), 8),
     ],
     "services": [
+        # Технические маркеры
         (re.compile(r"services?/\*\.py", re.IGNORECASE), 12),
         (re.compile(r"nutrition_service|reminder_service", re.IGNORECASE), 10),
         (re.compile(r"APScheduler", re.IGNORECASE), 8),
         (re.compile(r"AI\s+service.*OpenRouter", re.IGNORECASE), 8),
         (re.compile(r"cache\s+merge", re.IGNORECASE), 6),
+        # Естественный язык
+        (re.compile(r"сервис|service", re.IGNORECASE), 6),
+        (re.compile(r"калори|calor|nutrition", re.IGNORECASE), 7),
+        (re.compile(r"расчет|calculate|BMI|BMR", re.IGNORECASE), 6),
     ],
     "frontend": [
+        # Технические маркеры
         (re.compile(r"frontend/\*\*/\*", re.IGNORECASE), 12),
         (re.compile(r"Next\.?js", re.IGNORECASE), 10),
         (re.compile(r"\bReact\b", re.IGNORECASE), 8),
         (re.compile(r"Telegram\s+Login\s+Widget", re.IGNORECASE), 6),
         (re.compile(r"\.tsx\b|\.jsx\b", re.IGNORECASE), 6),
+        # Естественный язык
+        (re.compile(r"компонент|component", re.IGNORECASE), 7),
+        (re.compile(r"страниц|page|landing", re.IGNORECASE), 6),
+        (re.compile(r"\buse(state|effect)\b", re.IGNORECASE), 6),
+        (re.compile(r"вёрстка|layout|dashboard", re.IGNORECASE), 6),
     ],
     "mobile": [
+        # Технические маркеры
         (re.compile(r"mobile/\*\*/\*", re.IGNORECASE), 12),
         (re.compile(r"Flutter.*Dart", re.IGNORECASE), 10),
         (re.compile(r"calorit_app", re.IGNORECASE), 8),
         (re.compile(r"MOBILE_APP_PLAN\.md", re.IGNORECASE), 6),
+        # Естественный язык
+        (re.compile(r"\bflutter\b|\bdart\b", re.IGNORECASE), 8),
+        (re.compile(r"экран|screen", re.IGNORECASE), 6),
+        (re.compile(r"виджет|widget", re.IGNORECASE), 6),
+        (re.compile(r"\bandroid\b|\bios\b", re.IGNORECASE), 5),
     ],
     "design": [
+        # Технические маркеры
         (re.compile(r"design/\*\*/\*", re.IGNORECASE), 12),
         (re.compile(r"design\s+tokens", re.IGNORECASE), 10),
         (re.compile(r"Material\s*3", re.IGNORECASE), 8),
         (re.compile(r"Figma", re.IGNORECASE), 6),
         (re.compile(r"design/context", re.IGNORECASE), 6),
+        # Естественный язык
+        (re.compile(r"дизайн|design", re.IGNORECASE), 7),
+        (re.compile(r"цвет|color|palette", re.IGNORECASE), 6),
+        (re.compile(r"тема|theme|dark.*light", re.IGNORECASE), 6),
+        (re.compile(r"\bиконк|icon|лого\b", re.IGNORECASE), 5),
     ],
     "coordinator": [
+        # Технические маркеры
         (re.compile(r"SYSTEM_CONTEXT\.md", re.IGNORECASE), 12),
         (re.compile(r"Coordinator.*главный\s+агент", re.IGNORECASE), 10),
         (re.compile(r"декомпозици.*фаз", re.IGNORECASE), 8),
         (re.compile(r"Деплой\s+на\s+VPS\s+через\s+SSH", re.IGNORECASE), 6),
+        # Естественный язык
+        (re.compile(r"архитектур|architecture", re.IGNORECASE), 7),
+        (re.compile(r"разбей\s+задач|декомпозиц", re.IGNORECASE), 8),
+        (re.compile(r"код.ревью|code.review", re.IGNORECASE), 6),
+        (re.compile(r"\bплан\b", re.IGNORECASE), 6),
+        (re.compile(r"\bфаз[а-я]*", re.IGNORECASE), 6),
     ],
 }
 
