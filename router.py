@@ -802,11 +802,37 @@ def smart_route_model(
         result = _resolve_mapping(agent)
         if result:
             return result
-        # если 'auto' — падаем дальше
+            # Agent распознан, но mapping = "auto" или отсутствует
+            # -> берём default_model роли агента из role_models
+            role = get_role_for_agent(agent)
+            if role:
+                model = state.config.get("role_models", {}).get(role) or get_role_default_model(role)
+                if model:
+                    last_identified_agent = agent
+                    return model, role, f"{mechanism} (auto -> {role} default)"
+
+    # 3. Проверка явного тега [AGENT:name] в последнем user-сообщении
+    # ВАЖНО: выполняется ДО sub-agent heuristic, чтобы [AGENT:coordinator] работал
+    if last_user_msg:
+        tag_match = AGENT_TAG_PATTERN.search(last_user_msg)
+        if tag_match:
+            agent = tag_match.group(1).lower()
+            mechanism = f"Agent tag: {agent}"
+            result = _resolve_mapping(agent)
+            if result:
+                return result
+            # Agent распознан по тегу, но mapping = "auto" или отсутствует
+            # -> берём default_model роли агента из role_models
+            role = get_role_for_agent(agent)
+            if role:
+                model = state.config.get("role_models", {}).get(role) or get_role_default_model(role)
+                if model:
+                    last_identified_agent = agent
+                    return model, role, f"Agent tag: {agent} (auto -> {role} default)"
 
     # 2.5 Sub-agent detection (Quick Win)
-    # Если system prompt < порога Coordinator и fingerprint не нашёл CalorIt-агента
-    # → это sub-agent (не Coordinator) → worker_default (дешёвая модель)
+    # Если system prompt < порога Coordinator, нет fingerprint и нет agent tag
+    # → это sub-agent → worker_default (дешёвая модель)
     if system_prompt and len(system_prompt) < COORDINATOR_PROMPT_THRESHOLD:
         fp = fingerprint_system_prompt(system_prompt)
         if not fp:
@@ -814,8 +840,6 @@ def smart_route_model(
                 "worker_default"
             )
             return default, "worker_default", "Sub-agent (default_worker)"
-
-    # 3. Проверка явного тега [AGENT:name] в последнем user-сообщении
     if last_user_msg:
         tag_match = AGENT_TAG_PATTERN.search(last_user_msg)
         if tag_match:
@@ -840,6 +864,14 @@ def smart_route_model(
         result = _resolve_mapping(agent)
         if result:
             return result
+            # Agent распознан, но mapping = "auto" или отсутствует
+            # -> берём default_model роли агента из role_models
+            role = get_role_for_agent(agent)
+            if role:
+                model = state.config.get("role_models", {}).get(role) or get_role_default_model(role)
+                if model:
+                    last_identified_agent = agent
+                    return model, role, f"{mechanism} (auto -> {role} default)"
 
     # 6. Проверка явного spawn_agent() в сообщении пользователя
     spawn_match = SPAWN_AGENT_PATTERN.search(last_user_msg)
@@ -849,6 +881,14 @@ def smart_route_model(
         result = _resolve_mapping(agent)
         if result:
             return result
+            # Agent распознан, но mapping = "auto" или отсутствует
+            # -> берём default_model роли агента из role_models
+            role = get_role_for_agent(agent)
+            if role:
+                model = state.config.get("role_models", {}).get(role) or get_role_default_model(role)
+                if model:
+                    last_identified_agent = agent
+                    return model, role, f"{mechanism} (auto -> {role} default)"
         if state.config.get("enable_auto_routing"):
             return (
                 state.config["default_worker"],

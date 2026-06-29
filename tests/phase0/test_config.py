@@ -14,11 +14,11 @@ class TestConfig:
         assert "agent_to_worker_mapping" in data
 
     async def test_config_has_coordinator(self, client):
-        """Mapping содержит coordinator."""
+        """role_models содержит coordinator."""
         resp = await client.get("/config")
         data = resp.json()
-        mapping = data.get("agent_to_worker_mapping", {})
-        assert "coordinator" in mapping
+        role_models = data.get("role_models", {})
+        assert "coordinator" in role_models
 
     async def test_config_has_default_worker(self, client):
         """Есть default_worker."""
@@ -71,5 +71,5 @@ class TestConfig:
         """Coordinator не должен быть GLM (проверка что тесты не портят конфиг)."""
         resp = await client.get("/config")
         data = resp.json()
-        coord = data.get("agent_to_worker_mapping", {}).get("coordinator", "")
+        coord = data.get("role_models", {}).get("coordinator", "")
         assert "glm" not in coord.lower(), f"Coordinator is GLM: {coord}"

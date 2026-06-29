@@ -44,22 +44,35 @@ def isolate_config(tmp_path):
     orig_config = dict(router.state.config)
     orig_available_models = dict(router.state.available_models)
 
-    # Берём модели из config.yaml (не хардкодим!)
-    coord_model = (
-        router.get_role_default_model("coordinator") or "deepseek/deepseek-v4-pro"
-    )
-    worker_model = (
-        router.get_role_default_model("worker_default") or "deepseek/deepseek-v4-flash"
-    )
-    img_model = router.get_role_default_model("worker_img") or "qwen/qwen3-coder-next"
+    # Берём модели из ROLES_CFG напрямую (НЕ через get_role_default_model —
+    # она уже читает из state.config, который ещё не подменён)
+    from router import ROLES_CFG as _ROLES_CFG
 
-    # Создаём временный routing.json
+    coord_cfg = _ROLES_CFG.get("coordinator", {})
+    worker_cfg = _ROLES_CFG.get("worker_default", {})
+    img_cfg = _ROLES_CFG.get("worker_img", {})
+    coord_model = coord_cfg.get("default_model") or "deepseek/deepseek-v4-pro"
+    worker_model = worker_cfg.get("default_model") or "deepseek/deepseek-v4-flash"
+    img_model = img_cfg.get("default_model") or "qwen/qwen3-coder-next"
+
+    # Создаём временный routing.json с role_models
     tmp_routing = tmp_path / "routing.json"
     routing_data = {
-        "agent_to_worker_mapping": {
-            "database": worker_model,
-            "frontend": img_model,
+        "role_models": {
             "coordinator": coord_model,
+            "worker_default": worker_model,
+            "worker_img": img_model,
+        },
+        "agent_to_worker_mapping": {
+            "database": "auto",
+            "tests": "auto",
+            "bot": "auto",
+            "api": "auto",
+            "services": "auto",
+            "devops": "auto",
+            "frontend": "auto",
+            "mobile": "auto",
+            "design": "auto",
         },
         "default_worker": worker_model,
         "enable_auto_routing": True,
