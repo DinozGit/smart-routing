@@ -68,9 +68,14 @@
 │ 5. 📦 Git Commit + Push — сохранение в репозиторий          │
 │    ├── git add -A                                           │
 │    ├── git commit -m "<message>"                            │
-│    └── git push origin master                               │
+│    └── git push origin main                                 │
 │                                                             │
-│ 6. 🤝 Согласование — ты проверяешь                          │
+│ 6. 📝 Docs — обновление документации                        │
+│    ├── README.md — если изменились user-facing функции      │
+│    ├── ROADMAP.md — отметить шаг как выполненный            │
+│    └── AGENTS.md — если изменились правила маршрутизации    │
+│                                                             │
+│ 7. 🤝 Согласование — ты проверяешь                          │
 │    ├── Я показываю что изменилось                           │
 │    ├── Ты смотришь логи / админку / Zed                     │
 │    └── Ты говоришь "GO" → следующий шаг                    │
@@ -119,6 +124,7 @@ curl -s -X POST http://localhost:8765/v1/chat/completions -H "Content-Type: appl
 - [ ] ✅ POST /v1/chat/completions не 404
 - [ ] ✅ Админка открывается
 - [ ] 📦 Git commit + push
+- [ ] 📝 Документация обновлена (README / ROADMAP / AGENTS)
 - [ ] 🤝 Согласовано с тобой
 ```
 
@@ -588,15 +594,17 @@ class SkillEngine:
 - [x] config.yaml + routing.json
 - [x] GET /v1/models
 - [x] Исправлен баг: `@app.post("/v1/chat/completions")` + `load_dotenv()`
-- [ ] **🔴 P0: Sub-agent fallback heuristic**
-- [ ] **🔴 P0: fingerprint_user_messages — естественный язык**
+- [x] **🔴 P0: Sub-agent fallback heuristic** (Step 1.1)
+- [x] **🔴 P0: fingerprint_user_messages — естественный язык** (Step 1.2)
+- [x] **🧪 Phase 0: 32 теста (health, proxy, config, logs)**
+- [x] **🧪 Phase 1: 30 тестов (sub-agent, natural lang)**
+- [ ] **🔴 P0: Дехардкод Coordinator fallback** (Step 1.3 — следующий)
 - [ ] **🔴 P0: Рефакторинг на 3 роли (Coordinator / Worker / Worker Img)**
 - [ ] **🔴 P0: Fallback chain между ролями**
 - [ ] 🟠 P1: Fine tuning в админке (параметры + промпты)
 - [ ] 🟠 P1: Динамические цены моделей
 - [ ] 🟠 P1: Разделение портов
 - [ ] 🟡 P2: Provider failover
-- [ ] 🟡 P2: Тесты (pytest)
 - [ ] 🟡 P2: Docker
 - [ ] 🟢 P3: Smart Router v2 — Agent Framework
 - [ ] 🟢 P3: Skill Prompting Engine
