@@ -159,6 +159,21 @@ if system_prompt and len(system_prompt) < COORDINATOR_PROMPT_THRESHOLD:
 
 Обязательный эндпоинт для Zed.
 
+### 1.4 Дехардкод Coordinator fallback
+
+**Что было:** неизвестные запросы → `mapping["coordinator"]` → GLM/Pro (дорого).
+Также size-based fallback: `len(system_prompt) > 3000 → coordinator`.
+
+**Что стало:** неизвестные запросы → `default_worker` → Flash (дёшево).
+Coordinator определяется **только** через fingerprinting (system prompt или user messages).
+Size-based fallback (шаг 4) полностью удалён.
+
+**Эффект:** неизвестные запросы и длинные generic промпты больше не улетают на дорогую модель.
+
+**Тесты:** `tests/phase1/test_dehardcode.py` — 8 тестов.
+
+**Коммит:** `1cfa15b`
+
 ---
 
 ## 🟠 P1 — Неделя 1-2
@@ -598,7 +613,7 @@ class SkillEngine:
 - [x] **🔴 P0: fingerprint_user_messages — естественный язык** (Step 1.2)
 - [x] **🧪 Phase 0: 32 теста (health, proxy, config, logs)**
 - [x] **🧪 Phase 1: 30 тестов (sub-agent, natural lang)**
-- [ ] **🔴 P0: Дехардкод Coordinator fallback** (Step 1.3 — следующий)
+- [x] **🔴 P0: Дехардкод Coordinator fallback** (Step 1.4, commit 1cfa15b)
 - [ ] **🔴 P0: Рефакторинг на 3 роли (Coordinator / Worker / Worker Img)**
 - [ ] **🔴 P0: Fallback chain между ролями**
 - [ ] 🟠 P1: Fine tuning в админке (параметры + промпты)
