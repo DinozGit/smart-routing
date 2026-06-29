@@ -615,7 +615,7 @@ class SkillEngine:
 - [x] **🧪 Phase 1: 30 тестов (sub-agent, natural lang)**
 - [x] **🔴 P0: Дехардкод Coordinator fallback** (Step 1.4, commit 1cfa15b)
 - [x] **🔴 P0: Рефакторинг на 3 роли (Coordinator / Worker / Worker Img)** (Step 2.1, commit 0f3359f)
-- [ ] **🔴 P0: Fallback chain между ролями**
+- [x] **🔴 P0: Fallback chain между ролями** (Step 2.2, commit 9263a2b)
 - [ ] 🟠 P1: Fine tuning в админке (параметры + промпты)
 - [ ] 🟠 P1: Динамические цены моделей
 - [ ] 🟠 P1: Разделение портов
