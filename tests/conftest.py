@@ -40,9 +40,10 @@ def sample_coordinator_prompt() -> str:
         "You are the Zed coding agent running inside the Zed editor.\n"
         "You have AGENTS.md with multi-agent configuration.\n"
         "SYSTEM_CONTEXT.md is the single source of truth.\n"
-        "Your job is to decompose phases into sub-tasks, "
-        "distribute between spawn_agent, synthesize results, code review.\n"
-        "Deploy on VPS via SSH key in ~/.ssh/authorized_keys."
+        "Coordinator (главный агент в этом чате).\n"
+        "Декомпозиция фаз на подзадачи, распределение между spawn_agent.\n"
+        "Деплой на VPS через SSH (ключ в ~/.ssh/authorized_keys).\n"
+        "Your job is to synthesize results, code review.\n"
     )
 
 

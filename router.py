@@ -612,12 +612,9 @@ def smart_route_model(requested_model: str, body: Dict[str, Any]) -> Tuple[str, 
             if result:
                 return result
 
-    # 4. Проверка на Coordinator по размеру system prompt (fallback)
-    if len(system_prompt) > COORDINATOR_PROMPT_THRESHOLD:
-        mechanism = "Coordinator (Большой system prompt)"
-        result = _resolve_mapping("coordinator")
-        if result:
-            return result
+    # 4. Coordinator определяется ТОЛЬКО через fingerprinting (steps 2, 5)
+    # Size-based fallback удалён (Step 1.3): длинный промпт без fingerprint
+    # → default_worker, а не coordinator
 
     if not last_user_msg:
         return requested_model, "Пустой user prompt"
@@ -661,17 +658,15 @@ def smart_route_model(requested_model: str, body: Dict[str, Any]) -> Tuple[str, 
                 f"Авто-маршрутизация (qwen: {scores['qwen']})",
             )
 
-    # 8. Default
+    # 8. Default — неизвестные запросы → default_worker (Flash)
+    # Coordinator определяется ТОЛЬКО через fingerprinting (steps 2, 4, 5),
+    # а не как fallback по умолчанию.
+    default = state.config.get("default_worker", requested_model)
     if last_identified_agent:
         # Агент распознан, но стоит "auto" → default_worker
-        default = state.config.get("default_worker", requested_model)
         return default, f"{mechanism} (auto → default)"
-    # Не распознан → проверяем coordinator в config или Pro
-    mapping = state.config.get("agent_to_worker_mapping", {})
-    model = mapping.get("coordinator")
-    if model and model != "auto":
-        return model, f"Config: coordinator → {model}"
-    return requested_model, "Не найдено паттернов"
+    # Не распознан → default_worker (не Coordinator!)
+    return default, "Unknown → default_worker"
 
 
 # ============================================================
