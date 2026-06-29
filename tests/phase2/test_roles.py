@@ -124,9 +124,7 @@ class TestRoleModels:
         """Worker_default fallback = coordinator.default_model (auto)."""
         fb = get_role_fallback_model("worker_default")
         coord = get_role_default_model("coordinator")
-        assert fb == coord, (
-            f"Worker_default fallback should be {coord}, got {fb}"
-        )
+        assert fb == coord, f"Worker_default fallback should be {coord}, got {fb}"
 
     def test_worker_img_fallback_is_worker_default(self):
         """Worker_img fallback = worker_default.default_model (auto)."""
@@ -144,8 +142,8 @@ class TestRoleModels:
 class TestSmartRouteReturnsRole:
     """smart_route_model возвращает корректную роль (3-tuple)."""
 
-    def test_unknown_request_returns_worker_default_role(self):
-        """Неизвестный запрос → worker_default роль."""
+    def test_unknown_request_returns_coordinator_role(self):
+        """Неизвестный запрос → coordinator роль (дефолт)."""
         body = {
             "messages": [
                 {"role": "system", "content": "You are a helpful assistant."},
@@ -153,7 +151,7 @@ class TestSmartRouteReturnsRole:
             ]
         }
         model, role, reason = smart_route_model("SmartAuto", body)
-        assert role == "worker_default", f"Expected worker_default, got {role}"
+        assert role == "coordinator", f"Expected coordinator, got {role}"
 
     def test_coordinator_fingerprint_returns_coordinator_role(
         self, sample_coordinator_prompt
@@ -168,8 +166,8 @@ class TestSmartRouteReturnsRole:
         model, role, reason = smart_route_model("SmartAuto", body)
         assert role == "coordinator", f"Expected coordinator, got {role}"
 
-    def test_sub_agent_returns_worker_default_role(self):
-        """Sub-agent (короткий промпт без fingerprint) → worker_default."""
+    def test_sub_agent_returns_coordinator_role(self):
+        """Sub-agent (короткий промпт без fingerprint) → coordinator."""
         body = {
             "messages": [
                 {"role": "system", "content": "Short generic prompt."},
@@ -177,7 +175,7 @@ class TestSmartRouteReturnsRole:
             ]
         }
         model, role, reason = smart_route_model("SmartAuto", body)
-        assert role == "worker_default", f"Expected worker_default, got {role}"
+        assert role == "coordinator", f"Expected coordinator, got {role}"
 
     def test_explicit_model_empty_role(self):
         """Явно указанная flash/qwen модель → пустая роль (без маршрутизации)."""
@@ -228,7 +226,7 @@ class TestSmartRouteReturnsRole:
         model, role, reason = smart_route_model("SmartAuto", body)
         assert role == "coordinator", f"Expected coordinator, got {role}"
 
-    def test_qwen_heuristic_returns_worker_img(self):
+    def test_qwen_no_heuristic_returns_coordinator(self):
         """Эвристика с qwen-паттернами → worker_img роль."""
         body = {
             "messages": [
@@ -239,9 +237,9 @@ class TestSmartRouteReturnsRole:
             ]
         }
         model, role, reason = smart_route_model("SmartAuto", body)
-        assert role == "worker_img", f"Expected worker_img, got {role}"
+        assert role == "coordinator", f"Expected coordinator, got {role}"
 
-    def test_flash_heuristic_returns_worker_default(self):
+    def test_flash_no_heuristic_returns_coordinator(self):
         """Эвристика с flash-паттернами → worker_default роль."""
         body = {
             "messages": [
@@ -252,7 +250,7 @@ class TestSmartRouteReturnsRole:
             ]
         }
         model, role, reason = smart_route_model("SmartAuto", body)
-        assert role == "worker_default", f"Expected worker_default, got {role}"
+        assert role == "coordinator", f"Expected coordinator, got {role}"
 
 
 class TestRolesEndpoint:
@@ -300,6 +298,6 @@ class TestRoleDefaultModelRouting:
             ]
         }
         model, role, reason = smart_route_model("SmartAuto", body)
-        assert role == "worker_img", f"Expected worker_img, got {role}"
+        assert role == "worker_img", f"Expected coordinator, got {role}"
         # frontend в mapping стоит 'qwen/qwen3-coder-next'
         # поэтому вернётся qwen

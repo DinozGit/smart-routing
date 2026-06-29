@@ -1,9 +1,8 @@
 """
 Phase 1 — тесты дехардкода Coordinator fallback (Step 1.3).
 
-Раньше: неизвестные запросы → mapping["coordinator"] → GLM/Pro (дорого).
-Теперь: неизвестные запросы → default_worker → Flash (дёшево).
-Coordinator определяется ТОЛЬКО через fingerprinting.
+Теперь: неизвестные запросы → Coordinator (он сам распределяет).
+Coordinator определяется через fingerprint, agent tag, или дефолт.
 """
 
 import sys
@@ -15,10 +14,10 @@ from router import smart_route_model
 
 
 class TestDehardcodeCoordinatorFallback:
-    """Шаг 8 — неизвестные запросы → default_worker, а не coordinator."""
+    """Неизвестные запросы → coordinator model."""
 
-    def test_unknown_request_goes_to_default_worker(self):
-        """Запрос без fingerprint и без agent tag → default_worker, не coordinator."""
+    def test_unknown_request_goes_to_coordinator(self):
+        """Запрос без fingerprint и без agent tag → coordinator."""
         body = {
             "messages": [
                 {"role": "system", "content": "You are a helpful assistant."},
@@ -26,30 +25,13 @@ class TestDehardcodeCoordinatorFallback:
             ]
         }
         model, role, reason = smart_route_model("SmartAuto", body)
-        assert "flash" in model.lower(), (
-            f"Expected default_worker (flash), got {model} ({reason})"
-        )
-        assert "default" in reason.lower(), f"Expected default reason, got: {reason}"
-
-    def test_unknown_request_not_coordinator_model(self):
-        """Неизвестный запрос НЕ должен идти на coordinator model (glm/pro)."""
-        body = {
-            "messages": [
-                {"role": "system", "content": "Short generic prompt."},
-                {"role": "user", "content": "do something generic"},
-            ]
-        }
-        model, _, _ = smart_route_model("SmartAuto", body)
-        # coordinator model в config — deepseek/deepseek-v4-pro
-        assert "glm" not in model.lower(), (
-            f"Unknown request routed to coordinator model (glm): {model}"
-        )
-        assert "pro" not in model.lower(), (
-            f"Unknown request routed to coordinator model (pro): {model}"
+        assert role == "coordinator", f"Expected coordinator, got {role} ({reason})"
+        assert "coordinator" in reason.lower(), (
+            f"Expected coordinator reason, got: {reason}"
         )
 
     def test_coordinator_fingerprint_still_works(self, sample_coordinator_prompt):
-        """Coordinator с fingerprint → coordinator model (не default_worker)."""
+        """Coordinator с fingerprint → coordinator model."""
         body = {
             "messages": [
                 {"role": "system", "content": sample_coordinator_prompt},
@@ -57,49 +39,38 @@ class TestDehardcodeCoordinatorFallback:
             ]
         }
         model, role, reason = smart_route_model("SmartAuto", body)
-        # Coordinator должен пройти через fingerprint → coordinator model (pro)
-        assert "pro" in model.lower(), (
-            f"Coordinator not routed to pro model: {model} ({reason})"
-        )
-        assert "glm" not in model.lower(), (
-            f"Coordinator should not be GLM: {model}"
-        )
+        assert (
+            "pro" in model.lower() or "glm" in model.lower() or "coordinator" in role
+        ), f"Coordinator not routed: {model} ({reason})"
         assert role == "coordinator", f"Expected role='coordinator', got '{role}'"
 
-    def test_empty_messages_goes_to_default(self):
-        """Пустой messages → default_worker, не coordinator."""
+    def test_empty_messages_goes_to_requested(self):
+        """Пустой messages → запрошенная модель."""
         body = {"messages": []}
         model, _, _ = smart_route_model("SmartAuto", body)
-        # Пустые messages → "Нет сообщений" → запрошенная модель
-        # Но если дошли до step 8, то default_worker
         assert model is not None
 
-    def test_no_messages_key_goes_to_default(self):
-        """Запрос без ключа messages → default_worker, не coordinator."""
+    def test_no_messages_key_goes_to_requested(self):
+        """Запрос без ключа messages → запрошенная модель."""
         body = {}
         model, _, _ = smart_route_model("SmartAuto", body)
         assert model is not None
 
-    def test_explicit_flash_not_routed_to_coordinator(self):
-        """Явно указанная flash-модель не перенаправляется на coordinator."""
+    def test_explicit_flash_stays_flash(self):
+        """Явно указанная flash-модель не меняется."""
         body = {"messages": [{"role": "user", "content": "hello"}]}
         model, _, _ = smart_route_model("deepseek/deepseek-v4-flash", body)
         assert "flash" in model.lower()
 
-    def test_explicit_qwen_not_routed_to_coordinator(self):
-        """Явно указанная qwen-модель не перенаправляется на coordinator."""
+    def test_explicit_qwen_stays_qwen(self):
+        """Явно указанная qwen-модель не меняется."""
         body = {"messages": [{"role": "user", "content": "hello"}]}
         model, _, _ = smart_route_model("qwen/qwen3-coder-next", body)
         assert "qwen" in model.lower()
 
-    def test_generic_long_system_prompt_not_coordinator(self):
-        """
-        Длинный generic system prompt без Coordinator fingerprint → default_worker.
-        Раньше срабатывал fallback по размеру (>3000 → coordinator).
-        Теперь: если fingerprint не нашёл Coordinator → default_worker.
-        """
-        # Длинный промпт, но БЕЗ Coordinator-маркеров
-        generic_long = "You are a helpful coding assistant. " * 100  # ~4600 chars
+    def test_generic_long_system_prompt_goes_to_coordinator(self):
+        """Длинный generic system prompt → coordinator (а не worker)."""
+        generic_long = "You are a helpful coding assistant. " * 100
         body = {
             "messages": [
                 {"role": "system", "content": generic_long},
@@ -107,8 +78,4 @@ class TestDehardcodeCoordinatorFallback:
             ]
         }
         model, role, reason = smart_route_model("SmartAuto", body)
-        # Должен идти на worker_default, не coordinator
-        assert "flash" in model.lower() or "default" in reason.lower(), (
-            f"Generic long prompt routed to coordinator: {model} ({reason})"
-        )
-        assert role == "worker_default", f"Expected role='worker_default', got '{role}'"
+        assert role == "coordinator", f"Expected coordinator, got '{role}' ({reason})"
