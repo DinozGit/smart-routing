@@ -48,6 +48,7 @@ logger = logging.getLogger("SmartRouter")
 MAX_LOG_ENTRIES = 500
 log_buffer = deque(maxlen=MAX_LOG_ENTRIES)
 
+
 class RingBufferHandler(logging.Handler):
     """Перехватывает логи в кольцевой буфер in-memory."""
 
@@ -59,6 +60,7 @@ class RingBufferHandler(logging.Handler):
             "logger": record.name,
         }
         log_buffer.append(log_entry)
+
 
 # Подключаем handler к корневому логгеру
 ring_handler = RingBufferHandler(level=logging.INFO)
@@ -103,13 +105,16 @@ for role_name, role_cfg in ROLES_CFG.items():
     for agent in role_cfg.get("agents", []):
         AGENT_TO_ROLE[agent] = role_name
 
+
 def get_role_for_agent(agent: str) -> str | None:
     """Возвращает имя роли для агента или None."""
     return AGENT_TO_ROLE.get(agent)
 
+
 def get_role_config(role_name: str) -> dict:
     """Возвращает конфиг роли или пустой dict если роли нет."""
     return ROLES_CFG.get(role_name, {})
+
 
 def get_role_default_model(role_name: str) -> str | None:
     """
@@ -123,6 +128,7 @@ def get_role_default_model(role_name: str) -> str | None:
     # 2. Fallback в config.yaml
     role = get_role_config(role_name)
     return role.get("default_model")
+
 
 def get_role_fallback_model(role_name: str) -> str | None:
     """
@@ -146,6 +152,7 @@ def get_role_fallback_model(role_name: str) -> str | None:
     if fallback_role:
         return get_role_default_model(fallback_role)
     return None
+
 
 class RouterState:
     def __init__(self):
@@ -360,6 +367,7 @@ class RouterState:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
+
 state = RouterState()
 
 # ============================================================
@@ -476,11 +484,13 @@ COMPILED_PATTERNS = {
     ],
 }
 
+
 # ============================================================
 # 🛠 УТИЛИТЫ
 # ============================================================
 def sanitize_ascii(value: str) -> str:
     return re.sub(r"[^\x00-\x7F]+", "", str(value))
+
 
 def log_usage(model: str, input_tokens: int, output_tokens: int):
     """Обновляет статистику и логирует"""
@@ -522,6 +532,7 @@ def log_usage(model: str, input_tokens: int, output_tokens: int):
         f"💰 {model}: In {input_tokens} | Out {output_tokens} | Cost ${cost:.6f}"
     )
 
+
 # ============================================================
 # 🧠 УМНАЯ МАРШРУТИЗАЦИЯ
 # ============================================================
@@ -548,6 +559,7 @@ def fingerprint_system_prompt(system_prompt: str) -> Tuple[str, int] | None:
     if best_score >= MIN_FINGERPRINT_SCORE:
         return (best_agent, best_score)
     return None
+
 
 # ============================================================
 # 🔍 USER MESSAGE FINGERPRINTING
@@ -688,6 +700,7 @@ AGENT_SCOPE_PATTERNS = {
     ],
 }
 
+
 def fingerprint_user_messages(messages: list) -> Tuple[str, int] | None:
     """
     Определяет роль агента CalorIt по содержимому ВСЕХ user-сообщений.
@@ -731,6 +744,7 @@ def fingerprint_user_messages(messages: list) -> Tuple[str, int] | None:
         return (best_agent, best_score)
     return None
 
+
 def smart_route_model(
     requested_model: str, body: Dict[str, Any]
 ) -> Tuple[str, str, str]:
@@ -747,7 +761,8 @@ def smart_route_model(
 
     messages = body.get("messages", [])
     if not messages:
-        return requested_model, "", "Нет сообщений"
+        coord_model = state.config.get("role_models", {}).get("coordinator") or get_role_default_model("coordinator") or requested_model
+        return coord_model, "coordinator", "Нет сообщений -> coordinator"
 
     # Ищем системный промпт и последнее сообщение пользователя
     system_prompt = ""
@@ -756,6 +771,13 @@ def smart_route_model(
     for msg in reversed(messages):
         role = msg.get("role")
         content = msg.get("content", "")
+        # content может быть массивом (multimodal) — извлекаем текст
+        if isinstance(content, list):
+            text_parts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text_parts.append(part.get("text", ""))
+            content = " ".join(text_parts)
         if isinstance(content, str):
             if role == "user" and not last_user_msg:
                 last_user_msg = content
@@ -792,11 +814,17 @@ def smart_route_model(
                 return result
 
     if not last_user_msg:
-        return requested_model, "", "Пустой user prompt"
+        coord_model = state.config.get("role_models", {}).get("coordinator") or get_role_default_model("coordinator") or requested_model
+        return coord_model, "coordinator", "Пустой user prompt -> coordinator"
 
     # 8. Default — ничего не распознано → Coordinator
-    coord_model = state.config.get("role_models", {}).get("coordinator") or get_role_default_model("coordinator") or state.config.get("default_worker", requested_model)
+    coord_model = (
+        state.config.get("role_models", {}).get("coordinator")
+        or get_role_default_model("coordinator")
+        or state.config.get("default_worker", requested_model)
+    )
     return coord_model, "coordinator", "Unknown → coordinator default"
+
 
 # ============================================================
 # 🚀 FASTAPI ПРИЛОЖЕНИЕ
@@ -806,9 +834,11 @@ app = FastAPI(title="SmartRouter")
 # Глобальный HTTP клиент для переиспользования соединений (Connection Pooling)
 http_client = httpx.AsyncClient(timeout=180.0)
 
+
 @app.on_event("shutdown")
 async def shutdown_event():
     await http_client.aclose()
+
 
 @app.get("/v1/models")
 async def list_models():
@@ -839,6 +869,7 @@ async def list_models():
             )
     return {"object": "list", "data": models_list}
 
+
 @app.get("/models/available")
 async def get_available_models(refresh: bool = Query(False)):
     if refresh:
@@ -847,6 +878,7 @@ async def get_available_models(refresh: bool = Query(False)):
         "models": state.get_all_available_models(),
         "last_sync": state._models_last_sync,
     }
+
 
 @app.post("/models/sync")
 async def sync_models():
@@ -858,13 +890,16 @@ async def sync_models():
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Sync failed: {e}")
 
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "cost": f"${state.stats['total_cost']:.4f}"}
 
+
 @app.get("/stats")
 async def get_stats():
     return state.stats
+
 
 @app.get("/logs")
 async def get_logs(level: str = Query(None), limit: int = Query(50)):
@@ -873,6 +908,7 @@ async def get_logs(level: str = Query(None), limit: int = Query(50)):
     if level:
         logs = [l for l in logs if l["level"] == level.upper()]
     return logs[-limit:]
+
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_page():
@@ -884,10 +920,12 @@ async def admin_page():
     )
     return HTMLResponse(admin_html)
 
+
 @app.get("/config")
 async def get_config():
     """Возвращает текущую конфигурацию маршрутизации."""
     return state.config
+
 
 @app.get("/roles")
 async def get_roles():
@@ -904,6 +942,7 @@ async def get_roles():
         }
     return {"roles": roles}
 
+
 @app.post("/config")
 async def update_config(request: Request):
     try:
@@ -912,6 +951,7 @@ async def update_config(request: Request):
         return {"status": "ok", "config": state.config}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
 @app.get("/providers")
 async def get_providers():
@@ -930,6 +970,7 @@ async def get_providers():
         "providers": result,
         "active_provider": state._active_provider,
     }
+
 
 @app.post("/providers")
 async def add_provider(request: Request):
@@ -987,6 +1028,7 @@ async def add_provider(request: Request):
         "active": name == state._active_provider,
     }
 
+
 async def set_env_key(key_env: str, value: str):
     """Записывает/обновляет API-ключ в .env файл."""
     env_file = Path(__file__).parent / ".env"
@@ -1014,6 +1056,7 @@ async def set_env_key(key_env: str, value: str):
     load_dotenv(override=True)
     logger.info(f"🔑 API-ключ {key_env} обновлён в .env")
 
+
 @app.delete("/providers/{name}")
 async def delete_provider(name: str):
     """Удаляет провайдера."""
@@ -1032,6 +1075,7 @@ async def delete_provider(name: str):
     await state.save_config_yaml()
     logger.info(f"🔌 Провайдер '{name}' удалён")
     return {"status": "ok", "active_provider": state._active_provider}
+
 
 @app.post("/v1/chat/completions")
 async def proxy(request: Request):
@@ -1191,6 +1235,7 @@ async def proxy(request: Request):
             )
         raise HTTPException(status_code=502, detail="Bad Gateway (all models failed)")
 
+
 # ============================================================
 # 🚀 ЗАПУСК СЕРВЕРА
 # ============================================================
@@ -1199,6 +1244,7 @@ ROUTER_PORT = int(SERVER_CFG.get("router_port", 8765))
 ADMIN_PORT = int(SERVER_CFG.get("admin_port", 8766))
 ADMIN_HOST = str(SERVER_CFG.get("admin_host", "127.0.0.1"))
 SINGLE_PORT = bool(SERVER_CFG.get("single_port", True))
+
 
 def _run_single_port():
     """Single-port mode: everything on router_port (default)."""
@@ -1212,6 +1258,7 @@ def _run_single_port():
         port=ROUTER_PORT,
         reload=False,
     )
+
 
 def _run_dual_port():
     """Dual-port mode: router on router_port, admin on admin_port."""
@@ -1242,6 +1289,7 @@ def _run_dual_port():
         port=ROUTER_PORT,
         reload=False,
     )
+
 
 if __name__ == "__main__":
     if SINGLE_PORT:
