@@ -148,6 +148,7 @@ class RouterState:
             "by_model": {},
             "routed_count": 0,
             "not_routed_count": 0,
+            "fallback_count": 0,
             "started_at": time.time(),
         }
         self.quota = {"last_check": 0, "is_ok": True}
@@ -1022,25 +1023,81 @@ async def proxy(request: Request):
 
         return StreamingResponse(stream_generator(), media_type="text/event-stream")
     else:
-        try:
-            resp = await http_client.post(target_url, json=body, headers=headers)
-            resp.raise_for_status()
-            result = resp.json()
+        # Non-streaming with fallback chain (Step 2.2)
+        # Chain: primary model → fallback_model (from role config)
+        fallback_model = get_role_fallback_model(role) if role else None
+        chain = [actual_model]
+        if fallback_model and fallback_model != actual_model:
+            chain.append(fallback_model)
 
-            usage = result.get("usage", {})
-            log_usage(
-                actual_model,
-                usage.get("prompt_tokens", 0),
-                usage.get("completion_tokens", 0),
+        last_error: Exception | None = None
+        for i, model in enumerate(chain):
+            is_last = i == len(chain) - 1
+            try:
+                body["model"] = model
+                resp = await http_client.post(target_url, json=body, headers=headers)
+                resp.raise_for_status()
+                result = resp.json()
+
+                usage = result.get("usage", {})
+                log_usage(
+                    model,
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                )
+                if i > 0:
+                    logger.info(f"✅ Fallback successful: {model}")
+                return JSONResponse(result)
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                # 4xx — client error, fallback не имеет смысла
+                if e.response.status_code < 500:
+                    logger.error(f"HTTP {e.response.status_code}: {e}")
+                    raise HTTPException(
+                        status_code=e.response.status_code,
+                        detail=f"Provider error: {e.response.status_code}",
+                    )
+                # 5xx — try next in chain
+                if not is_last:
+                    state.stats["fallback_count"] = (
+                        state.stats.get("fallback_count", 0) + 1
+                    )
+                    logger.warning(
+                        f"⚠️ Fallback: {chain[i]} → {chain[i + 1]} "
+                        f"(HTTP {e.response.status_code})"
+                    )
+                else:
+                    logger.error(
+                        f"❌ All models failed. Last: {model} "
+                        f"({e.response.status_code})"
+                    )
+            except httpx.TimeoutException as e:
+                last_error = e
+                if not is_last:
+                    state.stats["fallback_count"] = (
+                        state.stats.get("fallback_count", 0) + 1
+                    )
+                    logger.warning(f"⚠️ Fallback (timeout): {chain[i]} → {chain[i + 1]}")
+                else:
+                    logger.error(f"❌ Timeout on last model: {model}")
+            except httpx.HTTPError as e:
+                last_error = e
+                if not is_last:
+                    state.stats["fallback_count"] = (
+                        state.stats.get("fallback_count", 0) + 1
+                    )
+                    logger.warning(
+                        f"⚠️ Fallback (HTTP error): {chain[i]} → {chain[i + 1]}"
+                    )
+                else:
+                    logger.error(f"❌ HTTP error on last model: {model}: {e}")
+
+        # All models in chain failed
+        if isinstance(last_error, httpx.TimeoutException):
+            raise HTTPException(
+                status_code=504, detail="Gateway Timeout (all models failed)"
             )
-
-            return JSONResponse(result)
-        except httpx.HTTPError as e:
-            logger.error(f"HTTP ошибка от провайдера: {e}")
-            raise HTTPException(status_code=502, detail="Bad Gateway from Provider")
-        except Exception as e:
-            logger.error(f"Критическая ошибка: {e}")
-            raise HTTPException(status_code=500, detail="Internal Server Error")
+        raise HTTPException(status_code=502, detail="Bad Gateway (all models failed)")
 
 
 if __name__ == "__main__":

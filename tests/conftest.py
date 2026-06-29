@@ -6,11 +6,27 @@ import json
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 # Добавляем корень проекта в sys.path, чтобы router мог импортироваться
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+@pytest.fixture(autouse=True, scope="function")
+def fresh_http_client():
+    """
+    Пересоздаёт глобальный httpx.AsyncClient перед каждым тестом.
+    Решает проблему 'Event loop is closed' на Windows при совместном
+    запуске тестов с моками и без.
+    """
+    import router
+
+    router.http_client = httpx.AsyncClient(timeout=180.0)
+    yield
+    # Не закрываем — event loop уже может быть закрыт,
+    # сборщик мусора разберётся
 
 
 @pytest.fixture(scope="session")
