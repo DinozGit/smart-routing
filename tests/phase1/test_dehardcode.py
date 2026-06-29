@@ -25,7 +25,7 @@ class TestDehardcodeCoordinatorFallback:
                 {"role": "user", "content": "hello world"},
             ]
         }
-        model, reason = smart_route_model("SmartAuto", body)
+        model, role, reason = smart_route_model("SmartAuto", body)
         assert "flash" in model.lower(), (
             f"Expected default_worker (flash), got {model} ({reason})"
         )
@@ -39,7 +39,7 @@ class TestDehardcodeCoordinatorFallback:
                 {"role": "user", "content": "do something generic"},
             ]
         }
-        model, _ = smart_route_model("SmartAuto", body)
+        model, _, _ = smart_route_model("SmartAuto", body)
         # coordinator model в config — z-ai/glm-5.2
         assert "glm" not in model.lower(), (
             f"Unknown request routed to coordinator model (glm): {model}"
@@ -56,16 +56,17 @@ class TestDehardcodeCoordinatorFallback:
                 {"role": "user", "content": "review the architecture"},
             ]
         }
-        model, reason = smart_route_model("SmartAuto", body)
+        model, role, reason = smart_route_model("SmartAuto", body)
         # Coordinator должен пройти через fingerprint → coordinator model
         assert "glm" in model.lower() or "pro" in model.lower(), (
             f"Coordinator not routed to coordinator model: {model} ({reason})"
         )
+        assert role == "coordinator", f"Expected role='coordinator', got '{role}'"
 
     def test_empty_messages_goes_to_default(self):
         """Пустой messages → default_worker, не coordinator."""
         body = {"messages": []}
-        model, reason = smart_route_model("SmartAuto", body)
+        model, _, _ = smart_route_model("SmartAuto", body)
         # Пустые messages → "Нет сообщений" → запрошенная модель
         # Но если дошли до step 8, то default_worker
         assert model is not None
@@ -73,19 +74,19 @@ class TestDehardcodeCoordinatorFallback:
     def test_no_messages_key_goes_to_default(self):
         """Запрос без ключа messages → default_worker, не coordinator."""
         body = {}
-        model, reason = smart_route_model("SmartAuto", body)
+        model, _, _ = smart_route_model("SmartAuto", body)
         assert model is not None
 
     def test_explicit_flash_not_routed_to_coordinator(self):
         """Явно указанная flash-модель не перенаправляется на coordinator."""
         body = {"messages": [{"role": "user", "content": "hello"}]}
-        model, reason = smart_route_model("deepseek/deepseek-v4-flash", body)
+        model, _, _ = smart_route_model("deepseek/deepseek-v4-flash", body)
         assert "flash" in model.lower()
 
     def test_explicit_qwen_not_routed_to_coordinator(self):
         """Явно указанная qwen-модель не перенаправляется на coordinator."""
         body = {"messages": [{"role": "user", "content": "hello"}]}
-        model, reason = smart_route_model("qwen/qwen3-coder-next", body)
+        model, _, _ = smart_route_model("qwen/qwen3-coder-next", body)
         assert "qwen" in model.lower()
 
     def test_generic_long_system_prompt_not_coordinator(self):
@@ -102,8 +103,9 @@ class TestDehardcodeCoordinatorFallback:
                 {"role": "user", "content": "write a function"},
             ]
         }
-        model, reason = smart_route_model("SmartAuto", body)
-        # Должен идти на default_worker, не coordinator
+        model, role, reason = smart_route_model("SmartAuto", body)
+        # Должен идти на worker_default, не coordinator
         assert "flash" in model.lower() or "default" in reason.lower(), (
             f"Generic long prompt routed to coordinator: {model} ({reason})"
         )
+        assert role == "worker_default", f"Expected role='worker_default', got '{role}'"

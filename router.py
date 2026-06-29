@@ -92,6 +92,41 @@ HEURISTIC_THRESHOLD = ROUTING_CFG.get("heuristic_threshold", 2)
 # Логи
 MAX_LOG_ENTRIES = cfg.get("logging", {}).get("max_entries", 500)
 
+# ============================================================
+# 🎭 РОЛИ (Coordinator / Worker / Worker Img)
+# ============================================================
+# Загружаем роли из config.yaml
+ROLES_CFG = cfg.get("roles", {})
+
+# Обратный маппинг: agent_name → role_name
+# Строится из config: для каждой роли берём список её агентов
+AGENT_TO_ROLE: Dict[str, str] = {}
+for role_name, role_cfg in ROLES_CFG.items():
+    for agent in role_cfg.get("agents", []):
+        AGENT_TO_ROLE[agent] = role_name
+
+
+def get_role_for_agent(agent: str) -> str | None:
+    """Возвращает имя роли для агента или None."""
+    return AGENT_TO_ROLE.get(agent)
+
+
+def get_role_config(role_name: str) -> dict:
+    """Возвращает конфиг роли или пустой dict если роли нет."""
+    return ROLES_CFG.get(role_name, {})
+
+
+def get_role_default_model(role_name: str) -> str | None:
+    """Возвращает default_model роли или None."""
+    role = get_role_config(role_name)
+    return role.get("default_model")
+
+
+def get_role_fallback_model(role_name: str) -> str | None:
+    """Возвращает fallback_model роли или None."""
+    role = get_role_config(role_name)
+    return role.get("fallback_model")
+
 
 class RouterState:
     def __init__(self):
@@ -544,14 +579,23 @@ def fingerprint_user_messages(messages: list) -> Tuple[str, int] | None:
     return None
 
 
-def smart_route_model(requested_model: str, body: Dict[str, Any]) -> Tuple[str, str]:
+def smart_route_model(
+    requested_model: str, body: Dict[str, Any]
+) -> Tuple[str, str, str]:
+    """
+    Умная маршрутизация запроса.
+    Возвращает (model, role, reason):
+      - model: целевая модель для провайдера
+      - role: имя роли (coordinator / worker_default / worker_img) или ""
+      - reason: человекочитаемое объяснение
+    """
     # 1. Явная модель — если уже содержит flash или qwen, не трогаем
     if any(m in requested_model.lower() for m in ["flash", "qwen"]):
-        return requested_model, "Без изменений (уже дешевая)"
+        return requested_model, "", "Без изменений (уже дешевая)"
 
     messages = body.get("messages", [])
     if not messages:
-        return requested_model, "Нет сообщений"
+        return requested_model, "", "Нет сообщений"
 
     # Ищем системный промпт и последнее сообщение пользователя
     system_prompt = ""
@@ -566,18 +610,19 @@ def smart_route_model(requested_model: str, body: Dict[str, Any]) -> Tuple[str, 
             elif role == "system" and not system_prompt:
                 system_prompt = content
 
-    def _resolve_mapping(agent: str) -> Tuple[str, str] | None:
+    def _resolve_mapping(agent: str) -> Tuple[str, str, str] | None:
         """
         Проверяет конфиг для распознанного агента.
-        Если указана конкретная модель (не 'auto') — возвращает её.
-        Если 'auto' или нет в mapping — возвращает None.
+        Если указана конкретная модель (не 'auto') — возвращает (model, role, reason).
+        Если 'auto' — возвращает None (падаем дальше).
         """
         nonlocal last_identified_agent
         last_identified_agent = agent
         mapping = state.config.get("agent_to_worker_mapping", {})
         model = mapping.get(agent)
         if model and model != "auto":
-            return model, f"{mechanism}: {agent}"
+            role = get_role_for_agent(agent) or ""
+            return model, role, f"{mechanism}: {agent}"
         return None
 
     mechanism = ""
@@ -595,12 +640,12 @@ def smart_route_model(requested_model: str, body: Dict[str, Any]) -> Tuple[str, 
 
     # 2.5 Sub-agent detection (Quick Win)
     # Если system prompt < порога Coordinator и fingerprint не нашёл CalorIt-агента
-    # → это sub-agent (не Coordinator) → default_worker (дешёвая модель)
+    # → это sub-agent (не Coordinator) → worker_default (дешёвая модель)
     if system_prompt and len(system_prompt) < COORDINATOR_PROMPT_THRESHOLD:
         fp = fingerprint_system_prompt(system_prompt)
         if not fp:
             default = state.config.get("default_worker", "deepseek/deepseek-v4-flash")
-            return default, "Sub-agent (default_worker)"
+            return default, "worker_default", "Sub-agent (default_worker)"
 
     # 3. Проверка явного тега [AGENT:name] в последнем user-сообщении
     if last_user_msg:
@@ -617,7 +662,7 @@ def smart_route_model(requested_model: str, body: Dict[str, Any]) -> Tuple[str, 
     # → default_worker, а не coordinator
 
     if not last_user_msg:
-        return requested_model, "Пустой user prompt"
+        return requested_model, "", "Пустой user prompt"
 
     # 5. User message fingerprint — анализ ВСЕХ user-сообщений
     scope_fingerprint = fingerprint_user_messages(messages)
@@ -637,7 +682,11 @@ def smart_route_model(requested_model: str, body: Dict[str, Any]) -> Tuple[str, 
         if result:
             return result
         if state.config.get("enable_auto_routing"):
-            return state.config["default_worker"], f"spawn_agent (default fallback)"
+            return (
+                state.config["default_worker"],
+                "worker_default",
+                f"spawn_agent (default fallback)",
+            )
 
     # 7. Эвристический анализ по паттернам кода (если включено)
     if state.config.get("enable_auto_routing"):
@@ -650,23 +699,26 @@ def smart_route_model(requested_model: str, body: Dict[str, Any]) -> Tuple[str, 
         if scores["flash"] >= HEURISTIC_THRESHOLD and scores["qwen"] == 0:
             return (
                 "deepseek/deepseek-v4-flash",
+                "worker_default",
                 f"Авто-маршрутизация (flash: {scores['flash']})",
             )
         if scores["qwen"] >= HEURISTIC_THRESHOLD and scores["flash"] == 0:
             return (
                 "qwen/qwen3-coder-next",
+                "worker_img",
                 f"Авто-маршрутизация (qwen: {scores['qwen']})",
             )
 
-    # 8. Default — неизвестные запросы → default_worker (Flash)
-    # Coordinator определяется ТОЛЬКО через fingerprinting (steps 2, 4, 5),
+    # 8. Default — неизвестные запросы → worker_default (Flash)
+    # Coordinator определяется ТОЛЬКО через fingerprinting (steps 2, 5),
     # а не как fallback по умолчанию.
     default = state.config.get("default_worker", requested_model)
     if last_identified_agent:
-        # Агент распознан, но стоит "auto" → default_worker
-        return default, f"{mechanism} (auto → default)"
-    # Не распознан → default_worker (не Coordinator!)
-    return default, "Unknown → default_worker"
+        # Агент распознан, но стоит "auto" → worker_default
+        role = get_role_for_agent(last_identified_agent) or "worker_default"
+        return default, role, f"{mechanism} (auto → default)"
+    # Не распознан → worker_default (не Coordinator!)
+    return default, "worker_default", "Unknown → default_worker"
 
 
 # ============================================================
@@ -882,7 +934,7 @@ async def proxy(request: Request):
         raise HTTPException(status_code=400, detail=f"Устаревшее API: {original_model}")
 
     # Умная маршрутизация
-    actual_model, reason = smart_route_model(original_model, body)
+    actual_model, role, reason = smart_route_model(original_model, body)
     body["model"] = actual_model
 
     if actual_model != original_model:

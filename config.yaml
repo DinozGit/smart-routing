@@ -43,6 +43,47 @@ providers:
     default: true
     display_name: RouterAI
     models_endpoint: https://routerai.ru/api/v1/models
+roles:
+  coordinator:
+    name: "🧠 Coordinator"
+    description: "Сложные задачи, код-ревью, архитектура"
+    default_model: "z-ai/glm-5.2"
+    fallback_model: "deepseek/deepseek-v4-flash"
+    agents:
+      - coordinator
+    capabilities:
+      tools: true
+      images: false
+      max_tokens: 1048576
+  worker_default:
+    name: "⚡ Worker (default)"
+    description: "Технические задачи — database, api, tests, bot, services, devops"
+    default_model: "deepseek/deepseek-v4-flash"
+    fallback_model: "z-ai/glm-5.2"
+    agents:
+      - database
+      - tests
+      - bot
+      - api
+      - services
+      - devops
+    capabilities:
+      tools: true
+      images: false
+      max_tokens: 1048576
+  worker_img:
+    name: "🖼️ Worker Img"
+    description: "Задачи с изображениями — frontend, mobile, design"
+    default_model: "qwen/qwen3-coder-next"
+    fallback_model: "deepseek/deepseek-v4-flash"
+    agents:
+      - frontend
+      - mobile
+      - design
+    capabilities:
+      tools: true
+      images: true
+      max_tokens: 262144
 routing:
   coordinator_prompt_threshold: 3000
   heuristic_threshold: 2
