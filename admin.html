@@ -452,21 +452,33 @@
         <!-- TAB: Agents -->
         <div id="tab-agents" class="tab-content">
             <div class="config-card">
-                <div class="config-title">Models</div>
+                <div class="config-title">Roles</div>
                 <div class="config-row">
                     <label>🧠 Coordinator:</label>
                     <select id="model-coordinator"></select>
                     <span style="font-size: 12px; color: #8b949e"
-                        >принудительно, <b>auto</b> = fingerprinting</span
-                    >
+                        >fallback: <b id="fallback-coordinator"></b
+                    ></span>
                 </div>
                 <div class="config-row">
                     <label>⚡ Worker (default):</label>
                     <select id="model-default-worker"></select>
+                    <span style="font-size: 12px; color: #8b949e"
+                        >fallback: <b id="fallback-worker-default"></b
+                    ></span>
                 </div>
                 <div class="config-row">
-                    <label>💻 Frontend:</label>
-                    <select id="model-frontend"></select>
+                    <label>🖼️ Worker Img:</label>
+                    <select id="model-worker-img"></select>
+                    <span style="font-size: 12px; color: #8b949e"
+                        >fallback: <b id="fallback-worker-img"></b
+                    ></span>
+                </div>
+                <div class="config-row" style="flex-wrap: wrap; gap: 4px">
+                    <span style="font-size: 11px; color: #8b949e"
+                        >🧠 coordinator · ⚡ database, tests, bot, api,
+                        services, devops · 🖼️ frontend, mobile, design</span
+                    >
                 </div>
                 <div class="config-row">
                     <div class="toggle-wrap">
@@ -605,11 +617,12 @@
 
         <script>
             // ========== State ==========
-            let currentLevel = "";
+            let currentLevel = "INFO";
             let autoRefresh = true;
             let refreshTimer = null;
             let availableModels = [];
             let currentConfig = {};
+            let rolesConfig = {};
 
             // ========== Tab switching ==========
             function switchTab(name) {
@@ -630,7 +643,49 @@
             async function loadAgentConfig() {
                 const resp = await fetch("/config");
                 currentConfig = await resp.json();
+                await loadRoles();
                 renderAgentConfig();
+            }
+
+            async function loadRoles() {
+                try {
+                    const resp = await fetch("/roles");
+                    const data = await resp.json();
+                    rolesConfig = data.roles || {};
+                    // Показываем fallback-модели
+                    const fbCoord =
+                        rolesConfig["coordinator"]?.fallback_model || "—";
+                    const fbWorker =
+                        rolesConfig["worker_default"]?.fallback_model || "—";
+                    const fbImg =
+                        rolesConfig["worker_img"]?.fallback_model || "—";
+                    document.getElementById(
+                        "fallback-coordinator",
+                    ).textContent = fbCoord
+                        .replace("deepseek/", "")
+                        .replace("qwen/", "")
+                        .replace("z-ai/", "");
+                    document.getElementById(
+                        "fallback-worker-default",
+                    ).textContent = fbWorker
+                        .replace("deepseek/", "")
+                        .replace("qwen/", "")
+                        .replace("z-ai/", "");
+                    document.getElementById("fallback-worker-img").textContent =
+                        fbImg
+                            .replace("deepseek/", "")
+                            .replace("qwen/", "")
+                            .replace("z-ai/", "");
+                    // Worker Img select — по умолчанию из роли
+                    setSelectValue(
+                        "model-worker-img",
+                        rolesConfig["worker_img"]?.default_model ||
+                            "qwen/qwen3-coder-next",
+                    );
+                } catch (e) {
+                    console.error("Failed to load roles:", e);
+                    rolesConfig = {};
+                }
             }
 
             function renderAgentConfig() {
@@ -647,35 +702,39 @@
                     currentConfig.default_worker ||
                         "deepseek/deepseek-v4-flash",
                 );
-                setSelectValue(
-                    "model-frontend",
-                    mapping.frontend || "qwen/qwen3-coder-next",
-                );
+                // Worker Img: из mapping.frontend (legacy) или из роли
+                const workerImgModel =
+                    mapping.frontend ||
+                    rolesConfig["worker_img"]?.default_model ||
+                    "qwen/qwen3-coder-next";
+                setSelectValue("model-worker-img", workerImgModel);
                 document.getElementById("toggle-auto-routing").checked =
                     currentConfig.enable_auto_routing !== false;
 
-                // Agent mapping table (skip coordinator, it has its own select)
+                // Agent mapping table — показываем ВСЕХ агентов (10 шт),
+                // даже если их нет в routing.json (тогда «auto» → role default)
                 const agentTable =
                     document.getElementById("agent-mapping-body");
                 agentTable.innerHTML = "";
-                for (const [agent, model] of Object.entries(mapping)) {
-                    if (agent === "coordinator") continue;
+                const allAgents = [
+                    { name: "coordinator", icon: "🧠", role: "coordinator" },
+                    { name: "database", icon: "🗄️", role: "worker_default" },
+                    { name: "tests", icon: "🧪", role: "worker_default" },
+                    { name: "bot", icon: "🤖", role: "worker_default" },
+                    { name: "api", icon: "🔧", role: "worker_default" },
+                    { name: "services", icon: "⚙️", role: "worker_default" },
+                    { name: "devops", icon: "🚀", role: "worker_default" },
+                    { name: "frontend", icon: "💻", role: "worker_img" },
+                    { name: "mobile", icon: "📱", role: "worker_img" },
+                    { name: "design", icon: "🎨", role: "worker_img" },
+                ];
+                for (const { name: agent, icon, role } of allAgents) {
+                    if (agent === "coordinator") continue; // has its own select
+                    const mappedModel = mapping[agent] || "auto";
                     const tr = document.createElement("tr");
-                    const nameMap = {
-                        database: "🗄️",
-                        tests: "🧪",
-                        bot: "🤖",
-                        devops: "🚀",
-                        api: "🔧",
-                        services: "⚙️",
-                        frontend: "💻",
-                        mobile: "📱",
-                        design: "🎨",
-                    };
-                    const icon = nameMap[agent] || "";
-                    tr.innerHTML = `<td>${icon} ${agent.charAt(0).toUpperCase() + agent.slice(1)}</td>
+                    tr.innerHTML = `<td>${icon} ${agent.charAt(0).toUpperCase() + agent.slice(1)}<br><span style="font-size:10px;color:#8b949e">${role}</span></td>
       <td><select data-agent="${agent}" onchange="onAgentChange(this)">${models}</select></td>`;
-                    tr.querySelector("select").value = model;
+                    tr.querySelector("select").value = mappedModel;
                     agentTable.appendChild(tr);
                 }
             }
@@ -714,13 +773,13 @@
                 const defaultWorker = document.getElementById(
                     "model-default-worker",
                 ).value;
-                const frontendModel =
-                    document.getElementById("model-frontend").value;
+                const workerImgModel =
+                    document.getElementById("model-worker-img").value;
 
                 // Coordinator: значение из UI (auto или конкретная модель)
                 const mapping = {
                     coordinator: coordinatorModel,
-                    frontend: frontendModel,
+                    frontend: workerImgModel,
                 };
                 document
                     .querySelectorAll("#agent-mapping-body select[data-agent]")

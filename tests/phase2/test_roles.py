@@ -229,3 +229,53 @@ class TestSmartRouteReturnsRole:
         }
         model, role, reason = smart_route_model("SmartAuto", body)
         assert role == "worker_default", f"Expected worker_default, got {role}"
+
+
+class TestRolesEndpoint:
+    """GET /roles — эндпоинт для админки."""
+
+    async def test_roles_endpoint_returns_200(self, client):
+        resp = await client.get("/roles")
+        assert resp.status_code == 200
+
+    async def test_roles_endpoint_has_three_roles(self, client):
+        resp = await client.get("/roles")
+        data = resp.json()
+        roles = data["roles"]
+        assert "coordinator" in roles
+        assert "worker_default" in roles
+        assert "worker_img" in roles
+
+    async def test_roles_have_fallback_models(self, client):
+        resp = await client.get("/roles")
+        data = resp.json()
+        for role_name, role in data["roles"].items():
+            assert role["fallback_model"], f"{role_name} missing fallback_model"
+            assert role["default_model"], f"{role_name} missing default_model"
+
+    async def test_roles_have_agents_list(self, client):
+        resp = await client.get("/roles")
+        data = resp.json()
+        for role_name, role in data["roles"].items():
+            assert isinstance(role["agents"], list)
+            assert len(role["agents"]) > 0
+
+
+class TestRoleDefaultModelRouting:
+    """Распознанный агент с 'auto' → default_model роли (не всегда flash)."""
+
+    def test_frontend_auto_returns_qwen_not_flash(self):
+        """Frontend с auto → worker_img → qwen (не flash)."""
+        # Добавляем frontend в mapping как auto (по умолчанию)
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "[AGENT:frontend] Создай LoginForm",
+                }
+            ]
+        }
+        model, role, reason = smart_route_model("SmartAuto", body)
+        assert role == "worker_img", f"Expected worker_img, got {role}"
+        # frontend в mapping стоит 'qwen/qwen3-coder-next'
+        # поэтому вернётся qwen

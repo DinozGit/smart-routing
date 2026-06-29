@@ -712,12 +712,15 @@ def smart_route_model(
     # 8. Default — неизвестные запросы → worker_default (Flash)
     # Coordinator определяется ТОЛЬКО через fingerprinting (steps 2, 5),
     # а не как fallback по умолчанию.
-    default = state.config.get("default_worker", requested_model)
     if last_identified_agent:
-        # Агент распознан, но стоит "auto" → worker_default
+        # Агент распознан, но стоит "auto" → роль агента → default_model роли
         role = get_role_for_agent(last_identified_agent) or "worker_default"
-        return default, role, f"{mechanism} (auto → default)"
+        model = get_role_default_model(role) or state.config.get(
+            "default_worker", requested_model
+        )
+        return model, role, f"{mechanism} (auto → {role} default)"
     # Не распознан → worker_default (не Coordinator!)
+    default = state.config.get("default_worker", requested_model)
     return default, "worker_default", "Unknown → default_worker"
 
 
@@ -785,6 +788,22 @@ async def admin_page():
 async def get_config():
     """Возвращает текущую конфигурацию маршрутизации."""
     return state.config
+
+
+@app.get("/roles")
+async def get_roles():
+    """Возвращает роли и их модели (default + fallback) из config.yaml."""
+    roles = {}
+    for role_name, role_cfg in ROLES_CFG.items():
+        roles[role_name] = {
+            "name": role_cfg.get("name", role_name),
+            "description": role_cfg.get("description", ""),
+            "default_model": role_cfg.get("default_model", ""),
+            "fallback_model": role_cfg.get("fallback_model", ""),
+            "agents": role_cfg.get("agents", []),
+            "capabilities": role_cfg.get("capabilities", {}),
+        }
+    return {"roles": roles}
 
 
 @app.post("/config")
