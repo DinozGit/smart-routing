@@ -93,3 +93,4 @@ server:
   admin_host: 127.0.0.1
   admin_port: 8766
   router_port: 8765
+  single_port: true

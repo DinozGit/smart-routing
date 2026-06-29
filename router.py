@@ -1100,6 +1100,63 @@ async def proxy(request: Request):
         raise HTTPException(status_code=502, detail="Bad Gateway (all models failed)")
 
 
+# ============================================================
+# 🚀 ЗАПУСК СЕРВЕРА
+# ============================================================
+SERVER_CFG = cfg.get("server", {})
+ROUTER_PORT = int(SERVER_CFG.get("router_port", 8765))
+ADMIN_PORT = int(SERVER_CFG.get("admin_port", 8766))
+ADMIN_HOST = str(SERVER_CFG.get("admin_host", "127.0.0.1"))
+SINGLE_PORT = bool(SERVER_CFG.get("single_port", True))
+
+
+def _run_single_port():
+    """Single-port mode: everything on router_port (default)."""
+    logger.info(
+        f"🚀 SmartRouter запущен на http://{ADMIN_HOST}:{ROUTER_PORT} "
+        f"(single-port: router + admin)"
+    )
+    uvicorn.run(
+        "router:app",
+        host=ADMIN_HOST,
+        port=ROUTER_PORT,
+        reload=False,
+    )
+
+
+def _run_dual_port():
+    """Dual-port mode: router on router_port, admin on admin_port."""
+    import asyncio
+    import threading
+
+    def run_admin():
+        """Runs admin server in a separate thread."""
+        admin_config = uvicorn.Config(
+            app="router:app",
+            host=ADMIN_HOST,
+            port=ADMIN_PORT,
+            reload=False,
+            log_level="warning",
+        )
+        admin_server = uvicorn.Server(admin_config)
+        asyncio.run(admin_server.serve())
+
+    admin_thread = threading.Thread(target=run_admin, daemon=True)
+    admin_thread.start()
+    logger.info(
+        f"🚀 SmartRouter: router on http://{ADMIN_HOST}:{ROUTER_PORT}, "
+        f"admin on http://{ADMIN_HOST}:{ADMIN_PORT}"
+    )
+    uvicorn.run(
+        "router:app",
+        host=ADMIN_HOST,
+        port=ROUTER_PORT,
+        reload=False,
+    )
+
+
 if __name__ == "__main__":
-    logger.info("🚀 SmartRouter запущен на http://localhost:8765")
-    uvicorn.run("router:app", host="127.0.0.1", port=8765, reload=False)
+    if SINGLE_PORT:
+        _run_single_port()
+    else:
+        _run_dual_port()
