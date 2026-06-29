@@ -791,14 +791,6 @@ def smart_route_model(
             if result:
                 return result
 
-    # 2. System prompt fingerprint
-    fingerprint = fingerprint_system_prompt(system_prompt)
-    if fingerprint:
-        agent, score = fingerprint
-        result = _resolve_or_fallback(agent, f"Fingerprint (score={score})")
-        if result:
-            return result
-
     if not last_user_msg:
         return requested_model, "", "Пустой user prompt"
 
