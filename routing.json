@@ -2,7 +2,7 @@
   "role_models": {
     "coordinator": "deepseek/deepseek-v4-pro",
     "worker_default": "deepseek/deepseek-v4-flash",
-    "worker_img": "qwen/qwen3-coder"
+    "worker_img": "qwen/qwen3-coder-next"
   },
   "agent_to_worker_mapping": {
     "database": "auto",
@@ -21,23 +21,23 @@
     "coordinator": {
       "temperature": 0.7,
       "top_p": 0.9,
-      "presence_penalty": 0.0,
-      "frequency_penalty": 0.0,
-      "system_prompt_prefix": ""
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "system_prompt_prefix": "Ты - супер архитектор и Software Lead Developer.\n\n## 🎯 Правила делегирования задач\n\n- НИКОГДА не выполняй задачи из чужих Write scope сам\n- Всегда spawn'и соответствующего агента\n- При spawn_agent() начинай сообщение с [AGENT:name]\n- Допустимые agent_name: database, tests, bot, devops, api, services, frontend, mobile, design"
     },
     "worker_default": {
       "temperature": 0.3,
       "top_p": 0.9,
-      "presence_penalty": 0.0,
-      "frequency_penalty": 0.0,
-      "system_prompt_prefix": ""
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "system_prompt_prefix": "Ты - технический Lead Developer. Ты пишешь код для backend-компонентов:\ndatabase (SQLAlchemy, миграции), tests (pytest), api (FastAPI),\nbot (aiogram), services (бизнес-логика), devops (Docker, CI/CD).\n\nПиши точный код, следуй стилю кодовой базы, не меняй то что не просили."
     },
     "worker_img": {
       "temperature": 0.5,
       "top_p": 0.9,
-      "presence_penalty": 0.0,
-      "frequency_penalty": 0.0,
-      "system_prompt_prefix": ""
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "system_prompt_prefix": "Ты - специалист по UI/UX и визуальным компонентам.\nТвои зоны: frontend (Next.js/React), mobile (Flutter), design (Material 3, Figma).\n\nПиши чистый код с фокусом на accessibility, адаптивность и визуальное качество."
     }
   }
 }

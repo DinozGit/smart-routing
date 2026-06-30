@@ -157,7 +157,7 @@ class TestTuningCapsMaxTokens:
     """Tuning автоматически капает max_tokens."""
 
     async def test_tuning_caps_max_tokens(self, client, mock_proxy_post):
-        """Если max_tokens > context_length, капаем до context_length."""
+        """Если max_tokens > доступного, капаем с учётом input."""
         body = {
             "model": "SmartAuto",
             "messages": [{"role": "user", "content": "[AGENT:database] hello"}],
@@ -168,7 +168,7 @@ class TestTuningCapsMaxTokens:
 
         call_kwargs = mock_proxy_post.call_args[1]
         sent_body = call_kwargs["json"]
-        # context_length = 4096
+        # context_length=4096 (mock), max_allowed=60%=2457, min=4096 → 4096 < 99999 → cap до 4096
         assert sent_body["max_tokens"] == 4096
 
     async def test_tuning_does_not_cap_when_below_limit(self, client, mock_proxy_post):

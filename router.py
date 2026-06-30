@@ -1240,17 +1240,23 @@ async def proxy(request: Request):
             if param not in body and tuning.get(param) is not None:
                 body[param] = tuning[param]
 
-        # 2. Auto max_tokens cap из context_length модели (RouterAI)
+        # 2. Auto max_tokens cap — динамический, из context_length модели
         model_info = state.get_model_info(actual_model)
         if model_info:
             context_limit = model_info.get("context_length", 0)
             client_max = body.get("max_tokens", 0)
-            if context_limit > 0 and client_max > context_limit:
-                logger.info(
-                    f"🛡️ Capped max_tokens {client_max} → {context_limit} "
-                    f"({actual_model} limit)"
-                )
-                body["max_tokens"] = context_limit
+            if context_limit > 0 and client_max:
+                # Безопасный cap: не больше 60% от контекста модели.
+                # Input токены считает провайдер — мы не можем их точно оценить
+                # без токенизатора. 60% — консервативный запас.
+                max_allowed = int(context_limit * 0.6)
+                capped = min(client_max, max(max_allowed, 4096))
+                if capped < client_max:
+                    logger.info(
+                        f"🛡️ Capped max_tokens {client_max} → {capped} "
+                        f"({actual_model}: 60% of {context_limit})"
+                    )
+                    body["max_tokens"] = capped
 
         # 3. System prompt prefix — препендим перед тем, что прислал клиент
         prefix = tuning.get("system_prompt_prefix", "")
@@ -1317,7 +1323,7 @@ async def proxy(request: Request):
                     if not usage_found:
                         log_usage(actual_model, 0, 0)
             except Exception as e:
-                logger.error(f"Ошибка streaming: {e}")
+                logger.error(f"Ошибка streaming ({type(e).__name__}): {e}")
                 yield f'data: {{"error": "Internal Proxy Error"}}\n\n'
 
         return StreamingResponse(stream_generator(), media_type="text/event-stream")
