@@ -162,6 +162,55 @@
                 outline: none;
             }
 
+            /* Range slider */
+            .config-row input[type="range"] {
+                -webkit-appearance: none;
+                appearance: none;
+                background: #21262d;
+                height: 6px;
+                border-radius: 3px;
+                outline: none;
+                min-width: 160px;
+                border: none;
+            }
+            .config-row input[type="range"]::-webkit-slider-thumb {
+                -webkit-appearance: none;
+                appearance: none;
+                width: 16px;
+                height: 16px;
+                border-radius: 50%;
+                background: #58a6ff;
+                cursor: pointer;
+            }
+            .config-row .range-val {
+                font-size: 13px;
+                color: #c9d1d9;
+                min-width: 38px;
+                text-align: right;
+                font-variant-numeric: tabular-nums;
+            }
+            .config-row textarea {
+                background: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 8px 10px;
+                color: #c9d1d9;
+                font-size: 13px;
+                min-width: 300px;
+                font-family: inherit;
+                resize: vertical;
+                min-height: 60px;
+            }
+            .config-row textarea:focus {
+                border-color: #58a6ff;
+                outline: none;
+            }
+            .readonly-val {
+                font-size: 13px;
+                color: #58a6ff;
+                font-weight: 600;
+            }
+
             .btn {
                 padding: 8px 20px;
                 border-radius: 6px;
@@ -402,6 +451,9 @@
             >
                 🔌 Providers
             </div>
+            <div class="tab" data-tab="tuning" onclick="switchTab('tuning')">
+                🎚️ Fine Tuning
+            </div>
             <div class="tab" data-tab="models" onclick="switchTab('models')">
                 📦 Models
             </div>
@@ -553,6 +605,128 @@
                 >
 Loading...</pre>
             </div>
+        </div>
+
+        <!-- TAB: Fine Tuning -->
+        <div id="tab-tuning" class="tab-content">
+            <div class="config-card">
+                <div class="config-title">🎚️ Role Fine Tuning</div>
+                <div class="config-row">
+                    <label>Role:</label>
+                    <select id="tuning-role" onchange="onRoleChange()">
+                        <option value="coordinator">🧠 Coordinator</option>
+                        <option value="worker_default">
+                            ⚡ Worker (default)
+                        </option>
+                        <option value="worker_img">🖼️ Worker Img</option>
+                    </select>
+                </div>
+                <div class="config-row">
+                    <label>🌡️ Temperature:</label>
+                    <input
+                        type="range"
+                        id="tuning-temperature"
+                        min="0"
+                        max="2"
+                        step="0.1"
+                        oninput="
+                            updateSliderVal(
+                                'tuning-temperature',
+                                'val-temperature',
+                            )
+                        "
+                    />
+                    <span class="range-val" id="val-temperature">0.7</span>
+                </div>
+                <div class="config-row">
+                    <label>🎯 Top P:</label>
+                    <input
+                        type="range"
+                        id="tuning-top_p"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        oninput="updateSliderVal('tuning-top_p', 'val-top_p')"
+                    />
+                    <span class="range-val" id="val-top_p">0.9</span>
+                </div>
+                <div class="config-row">
+                    <label>📌 Presence Penalty:</label>
+                    <input
+                        type="range"
+                        id="tuning-presence_penalty"
+                        min="-2"
+                        max="2"
+                        step="0.1"
+                        oninput="
+                            updateSliderVal(
+                                'tuning-presence_penalty',
+                                'val-presence_penalty',
+                            )
+                        "
+                    />
+                    <span class="range-val" id="val-presence_penalty">0.0</span>
+                </div>
+                <div class="config-row">
+                    <label>📌 Frequency Penalty:</label>
+                    <input
+                        type="range"
+                        id="tuning-frequency_penalty"
+                        min="-2"
+                        max="2"
+                        step="0.1"
+                        oninput="
+                            updateSliderVal(
+                                'tuning-frequency_penalty',
+                                'val-frequency_penalty',
+                            )
+                        "
+                    />
+                    <span class="range-val" id="val-frequency_penalty"
+                        >0.0</span
+                    >
+                </div>
+                <div class="config-row">
+                    <label>🔒 Max Tokens Cap:</label>
+                    <span class="readonly-val" id="tuning-context-limit"
+                        >-</span
+                    >
+                    <span style="font-size: 11px; color: #8b949e"
+                        >(auto from RouterAI model limit)</span
+                    >
+                </div>
+            </div>
+
+            <div class="config-card">
+                <div class="config-title">📝 System Prompt Prefix</div>
+                <div class="config-row">
+                    <textarea
+                        id="tuning-prefix"
+                        placeholder="Prepended before the client's system prompt..."
+                    ></textarea>
+                </div>
+                <span style="font-size: 11px; color: #8b949e"
+                    >This text is prepended to the existing system prompt (does
+                    not replace it).</span
+                >
+            </div>
+
+            <button
+                class="btn btn-success"
+                id="btn-save-tuning"
+                onclick="saveTuning()"
+            >
+                💾 Save Tuning
+            </button>
+            <button
+                class="btn btn-primary"
+                id="btn-reset-tuning"
+                onclick="resetTuning()"
+                style="margin-left: 8px"
+            >
+                🔄 Reset to Defaults
+            </button>
+            <div id="tuning-status" class="save-status"></div>
         </div>
 
         <!-- TAB: Providers -->
@@ -721,6 +895,7 @@ Loading...</pre>
                     displayCurrentConfig();
                 }
                 if (name === "models") loadModelsList();
+                if (name === "tuning") loadTuning();
             }
 
             // ========== Config API ==========
@@ -1430,6 +1605,163 @@ Loading...</pre>
                     .catch(function (e) {
                         alert("Failed: " + e.message);
                     });
+            }
+
+            // ========== Fine Tuning ==========
+            let tuningCache = {};
+
+            function updateSliderVal(sliderId, valId) {
+                const slider = document.getElementById(sliderId);
+                const val = document.getElementById(valId);
+                if (slider && val)
+                    val.textContent = parseFloat(slider.value).toFixed(1);
+            }
+
+            async function loadTuning() {
+                try {
+                    const resp = await fetch("/roles/tuning");
+                    tuningCache = await resp.json();
+                    renderTuning();
+                } catch (e) {
+                    document.getElementById("tuning-status").className =
+                        "save-status err";
+                    document.getElementById("tuning-status").textContent =
+                        "Failed to load: " + e.message;
+                }
+            }
+
+            function onRoleChange() {
+                renderTuning();
+            }
+
+            function renderTuning() {
+                const role = document.getElementById("tuning-role").value;
+                const data = tuningCache[role];
+                if (!data) return;
+
+                setSlider("tuning-temperature", data.temperature);
+                setSlider("tuning-top_p", data.top_p);
+                setSlider("tuning-presence_penalty", data.presence_penalty);
+                setSlider("tuning-frequency_penalty", data.frequency_penalty);
+
+                document.getElementById("tuning-prefix").value =
+                    data.system_prompt_prefix || "";
+
+                // Fetch role detail for context_limit
+                fetch("/roles/" + role + "/tuning")
+                    .then((r) => r.json())
+                    .then((d) => {
+                        const limit = d.context_limit;
+                        document.getElementById(
+                            "tuning-context-limit",
+                        ).textContent = limit
+                            ? limit.toLocaleString() + " tokens"
+                            : "unknown";
+                    })
+                    .catch(() => {
+                        document.getElementById(
+                            "tuning-context-limit",
+                        ).textContent = "unknown";
+                    });
+            }
+
+            function setSlider(id, value) {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.value = value;
+                const valId = "val-" + id.replace("tuning-", "");
+                const valEl = document.getElementById(valId);
+                if (valEl) valEl.textContent = parseFloat(value).toFixed(1);
+            }
+
+            async function saveTuning() {
+                const role = document.getElementById("tuning-role").value;
+                const status = document.getElementById("tuning-status");
+                const btn = document.getElementById("btn-save-tuning");
+
+                const data = {
+                    temperature: parseFloat(
+                        document.getElementById("tuning-temperature").value,
+                    ),
+                    top_p: parseFloat(
+                        document.getElementById("tuning-top_p").value,
+                    ),
+                    presence_penalty: parseFloat(
+                        document.getElementById("tuning-presence_penalty")
+                            .value,
+                    ),
+                    frequency_penalty: parseFloat(
+                        document.getElementById("tuning-frequency_penalty")
+                            .value,
+                    ),
+                    system_prompt_prefix:
+                        document.getElementById("tuning-prefix").value,
+                };
+
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/roles/" + role + "/tuning", {
+                        method: "PUT",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(data),
+                    });
+                    const result = await resp.json();
+                    if (result.status === "ok") {
+                        tuningCache[role] = result.tuning;
+                        status.className = "save-status ok";
+                        status.textContent = "Saved!";
+                    } else {
+                        status.className = "save-status err";
+                        status.textContent = result.detail || "Error";
+                    }
+                } catch (e) {
+                    status.className = "save-status err";
+                    status.textContent = e.message;
+                } finally {
+                    btn.disabled = false;
+                    setTimeout(() => {
+                        status.className = "save-status";
+                        status.textContent = "";
+                    }, 3000);
+                }
+            }
+
+            function resetTuning() {
+                const role = document.getElementById("tuning-role").value;
+                const defaults = {
+                    coordinator: {
+                        temperature: 0.7,
+                        top_p: 0.9,
+                        presence_penalty: 0.0,
+                        frequency_penalty: 0.0,
+                    },
+                    worker_default: {
+                        temperature: 0.3,
+                        top_p: 0.9,
+                        presence_penalty: 0.0,
+                        frequency_penalty: 0.0,
+                    },
+                    worker_img: {
+                        temperature: 0.5,
+                        top_p: 0.9,
+                        presence_penalty: 0.0,
+                        frequency_penalty: 0.0,
+                    },
+                };
+                const d = defaults[role] || defaults.coordinator;
+                setSlider("tuning-temperature", d.temperature);
+                setSlider("tuning-top_p", d.top_p);
+                setSlider("tuning-presence_penalty", d.presence_penalty);
+                setSlider("tuning-frequency_penalty", d.frequency_penalty);
+                document.getElementById("tuning-prefix").value = "";
+
+                const status = document.getElementById("tuning-status");
+                status.className = "save-status ok";
+                status.textContent = "Reset to defaults — click Save to apply";
+                setTimeout(() => {
+                    status.className = "save-status";
+                    status.textContent = "";
+                }, 3000);
             }
         </script>
     </body>

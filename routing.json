@@ -1,8 +1,8 @@
 {
   "role_models": {
-    "coordinator": "z-ai/glm-5.2",
+    "coordinator": "deepseek/deepseek-v4-pro",
     "worker_default": "deepseek/deepseek-v4-flash",
-    "worker_img": "qwen/qwen3-coder-next"
+    "worker_img": "qwen/qwen3-coder"
   },
   "agent_to_worker_mapping": {
     "database": "auto",
@@ -16,5 +16,28 @@
     "design": "auto"
   },
   "default_worker": "deepseek/deepseek-v4-flash",
-  "enable_auto_routing": true
+  "enable_auto_routing": true,
+  "role_tuning": {
+    "coordinator": {
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "system_prompt_prefix": ""
+    },
+    "worker_default": {
+      "temperature": 0.3,
+      "top_p": 0.9,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "system_prompt_prefix": ""
+    },
+    "worker_img": {
+      "temperature": 0.5,
+      "top_p": 0.9,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "system_prompt_prefix": ""
+    }
+  }
 }

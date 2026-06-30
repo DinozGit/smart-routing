@@ -207,7 +207,9 @@ class RouterState:
         """
         Загружает runtime-конфиг из routing.json.
         Если файла нет — создаёт его с дефолтами из config.yaml.
+        Автоматически мигрирует: добавляет role_tuning если отсутствует.
         """
+        migrated = False
         if self.config_file.exists():
             try:
                 with open(self.config_file, "r", encoding="utf-8") as f:
@@ -217,11 +219,43 @@ class RouterState:
             except Exception as e:
                 logger.error(f"Ошибка загрузки {self.config_file}: {e}")
                 self._init_default_config()
+                migrated = True
         else:
             self._init_default_config()
-            # Сохраняем дефолтный конфиг на диск
+            migrated = True
+
+        # Миграция: добавляем role_tuning если отсутствует
+        if "role_tuning" not in self.config:
+            default_tuning = {
+                "coordinator": {
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "presence_penalty": 0.0,
+                    "frequency_penalty": 0.0,
+                    "system_prompt_prefix": "",
+                },
+                "worker_default": {
+                    "temperature": 0.3,
+                    "top_p": 0.9,
+                    "presence_penalty": 0.0,
+                    "frequency_penalty": 0.0,
+                    "system_prompt_prefix": "",
+                },
+                "worker_img": {
+                    "temperature": 0.5,
+                    "top_p": 0.9,
+                    "presence_penalty": 0.0,
+                    "frequency_penalty": 0.0,
+                    "system_prompt_prefix": "",
+                },
+            }
+            self.config["role_tuning"] = default_tuning
+            logger.info("🔄 Миграция: добавлен role_tuning с дефолтами")
+            migrated = True
+
+        if migrated:
             self._sync_write_config(self.config_file, self.config)
-            logger.info(f"📝 Создан дефолтный {self.config_file}")
+            logger.info(f"📝 Сохранён {self.config_file}")
 
     def _init_default_config(self):
         """Заполняет self.config дефолтами из config.yaml."""
@@ -251,6 +285,29 @@ class RouterState:
             },
             "default_worker": worker_model,
             "enable_auto_routing": True,
+            "role_tuning": {
+                "coordinator": {
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "presence_penalty": 0.0,
+                    "frequency_penalty": 0.0,
+                    "system_prompt_prefix": "",
+                },
+                "worker_default": {
+                    "temperature": 0.3,
+                    "top_p": 0.9,
+                    "presence_penalty": 0.0,
+                    "frequency_penalty": 0.0,
+                    "system_prompt_prefix": "",
+                },
+                "worker_img": {
+                    "temperature": 0.5,
+                    "top_p": 0.9,
+                    "presence_penalty": 0.0,
+                    "frequency_penalty": 0.0,
+                    "system_prompt_prefix": "",
+                },
+            },
         }
 
     def _load_models_cache(self):
@@ -761,7 +818,11 @@ def smart_route_model(
 
     messages = body.get("messages", [])
     if not messages:
-        coord_model = state.config.get("role_models", {}).get("coordinator") or get_role_default_model("coordinator") or requested_model
+        coord_model = (
+            state.config.get("role_models", {}).get("coordinator")
+            or get_role_default_model("coordinator")
+            or requested_model
+        )
         return coord_model, "coordinator", "Нет сообщений -> coordinator"
 
     # Ищем системный промпт и последнее сообщение пользователя
@@ -814,7 +875,11 @@ def smart_route_model(
                 return result
 
     if not last_user_msg:
-        coord_model = state.config.get("role_models", {}).get("coordinator") or get_role_default_model("coordinator") or requested_model
+        coord_model = (
+            state.config.get("role_models", {}).get("coordinator")
+            or get_role_default_model("coordinator")
+            or requested_model
+        )
         return coord_model, "coordinator", "Пустой user prompt -> coordinator"
 
     # 8. Default — ничего не распознано → Coordinator
@@ -932,6 +997,13 @@ async def get_roles():
     """Возвращает роли и их модели (default + fallback) из config.yaml."""
     roles = {}
     for role_name, role_cfg in ROLES_CFG.items():
+        # Вычисляем context_limit из модели роли (models_cache.json)
+        role_model = get_role_default_model(role_name)
+        context_limit = None
+        if role_model:
+            info = state.get_model_info(role_model)
+            if info:
+                context_limit = info.get("context_length")
         roles[role_name] = {
             "name": role_cfg.get("name", role_name),
             "description": role_cfg.get("description", ""),
@@ -939,8 +1011,66 @@ async def get_roles():
             "fallback_model": get_role_fallback_model(role_name) or "",
             "agents": role_cfg.get("agents", []),
             "capabilities": role_cfg.get("capabilities", {}),
+            "context_limit": context_limit,
         }
     return {"roles": roles}
+
+
+@app.get("/roles/tuning")
+async def get_roles_tuning():
+    """Возвращает все tuning-конфиги для ролей."""
+    return state.config.get("role_tuning", {})
+
+
+@app.get("/roles/{name}/tuning")
+async def get_role_tuning(name: str):
+    """Возвращает tuning-конфиг для конкретной роли."""
+    tuning = state.config.get("role_tuning", {})
+    if name not in tuning:
+        raise HTTPException(
+            status_code=404, detail=f"Role '{name}' not found in tuning"
+        )
+    # Добавляем context_limit из models_cache
+    role_model = get_role_default_model(name)
+    result = dict(tuning[name])
+    result["context_limit"] = None
+    if role_model:
+        info = state.get_model_info(role_model)
+        if info:
+            result["context_limit"] = info.get("context_length")
+    return result
+
+
+@app.put("/roles/{name}/tuning")
+async def update_role_tuning(name: str, request: Request):
+    """Сохраняет tuning-конфиг для роли."""
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    tuning = state.config.get("role_tuning", {})
+    if name not in tuning:
+        raise HTTPException(
+            status_code=404, detail=f"Role '{name}' not found in tuning"
+        )
+
+    # Валидируем и обновляем разрешённые поля
+    allowed = {
+        "temperature",
+        "top_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "system_prompt_prefix",
+    }
+    for key in allowed:
+        if key in data:
+            tuning[name][key] = data[key]
+
+    state.config["role_tuning"] = tuning
+    await state.save_config(state.config)
+    logger.info(f"🎚️ Tuning updated for role '{name}'")
+    return {"status": "ok", "tuning": tuning[name]}
 
 
 @app.post("/config")
@@ -1098,6 +1228,39 @@ async def proxy(request: Request):
         logger.info(f"🔄 Маршрутизация: {original_model} -> {actual_model} ({reason})")
     else:
         state.stats["not_routed_count"] += 1
+
+    # ============================================================
+    # 🎚️ Применение Fine Tuning для роли
+    # ============================================================
+    if role:
+        tuning = state.config.get("role_tuning", {}).get(role, {})
+
+        # 1. Default-параметры: только если Zed/клиент их НЕ указал
+        for param in ["temperature", "top_p", "presence_penalty", "frequency_penalty"]:
+            if param not in body and tuning.get(param) is not None:
+                body[param] = tuning[param]
+
+        # 2. Auto max_tokens cap из context_length модели (RouterAI)
+        model_info = state.get_model_info(actual_model)
+        if model_info:
+            context_limit = model_info.get("context_length", 0)
+            client_max = body.get("max_tokens", 0)
+            if context_limit > 0 and client_max > context_limit:
+                logger.info(
+                    f"🛡️ Capped max_tokens {client_max} → {context_limit} "
+                    f"({actual_model} limit)"
+                )
+                body["max_tokens"] = context_limit
+
+        # 3. System prompt prefix — препендим перед тем, что прислал клиент
+        prefix = tuning.get("system_prompt_prefix", "")
+        if prefix and isinstance(prefix, str) and prefix.strip():
+            messages = body.get("messages", [])
+            if messages and messages[0].get("role") == "system":
+                messages[0]["content"] = prefix + "\n\n" + messages[0]["content"]
+            elif messages:
+                messages.insert(0, {"role": "system", "content": prefix})
+            body["messages"] = messages
 
     # Используем динамический URL из state (активный провайдер)
     target_url = state.get_active_provider_url()
