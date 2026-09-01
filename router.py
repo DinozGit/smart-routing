@@ -7,6 +7,7 @@ import os
 import re
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -894,15 +895,20 @@ def smart_route_model(
 # ============================================================
 # 🚀 FASTAPI ПРИЛОЖЕНИЕ
 # ============================================================
-app = FastAPI(title="SmartRouter")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Современный способ задать startup/shutdown (заменяет @app.on_event)."""
+    yield
+    # shutdown: закрываем HTTP-клиент
+    await http_client.aclose()
+
+
+app = FastAPI(title="SmartRouter", lifespan=lifespan)
+
 
 # Глобальный HTTP клиент для переиспользования соединений (Connection Pooling)
 http_client = httpx.AsyncClient(timeout=180.0)
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await http_client.aclose()
 
 
 @app.get("/v1/models")
