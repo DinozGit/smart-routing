@@ -1,8 +1,8 @@
 {
   "role_models": {
-    "coordinator": "deepseek/deepseek-v4-pro",
+    "coordinator": "minimax/minimax-m3",
     "worker_default": "deepseek/deepseek-v4-flash",
-    "worker_img": "qwen/qwen3-coder-next"
+    "worker_img": "minimax/minimax-m3"
   },
   "agent_to_worker_mapping": {
     "database": "auto",

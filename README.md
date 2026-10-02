@@ -9,6 +9,18 @@ SmartRouter — это легковесный прокси-сервер, кот�
 4. Экономит до **90% затрат на AI-токены**
 5. Предоставляет **веб-админку** для управления моделями, агентами и провайдерами
 
+## 📋 Что нового
+
+### Спринт 2026-07 — Code review & hotfix
+
+- 🔧 **f8edbb0** — Исправлен критический баг запуска: `@app.on_event("shutdown")` заменён на современный `@asynccontextmanager lifespan`. Без фикса SmartRouter падал с `TypeError: Router.__init__() got an unexpected keyword argument 'on_startup'` (uvicorn ≥ 0.30 / FastAPI ≥ 0.110).
+- ✅ **Code review P1–P3** проведён: задокументированы «мёртвый» fingerprint, отсутствие rate limiting, persistent stats, CORS, Docker, неограниченный рост `models_cache.json`.
+- ❌ **ШАГ 2.5 (sub-agent fallback heuristic) — отклонён.** Coordinator в Zed — это главный thread чата, а не роль роутера. Существующая связка `[AGENT:name]` → `agent_to_worker_mapping` работает корректно, а добавление fallback'а по длине system prompt ломало бы короткие Coordinator-промпты (например, через CLI). Подробнее — в логе спринта.
+- 🐛 **Coordinator minimax/minimax-m3** падал с `In 0/Out 0` → вся маршрутизация через `Unknown → coordinator` шла на сломанную модель. Сейчас явная модель `minimax/*` не трогается (шаг 1).
+- 🧪 **172/172 теста зелёные** на master (c5a7d1a..f8edbb0).
+
+---
+
 ## 🚀 Быстрый старт
 
 ### Установка
@@ -24,6 +36,15 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+> ⚠️ **Важно про venv на Windows.** В системе часто установлено несколько Python одновременно (например, `C:\Users\<user>\AppData\Roaming\Python\Python314` + системный `python.exe`). Если после `venv\Scripts\activate` вызывается `python -m pytest` не из `venv\Scripts\`, идёт конфликт с `AppData\…\site-packages` (другой `pip install` граф).
+>
+> **Проверка:**
+> ```bash
+> where python       # первый путь должен быть smart-routing\venv\Scripts\python.exe
+> python -c "import sys; print(sys.executable)"
+> ```
+> Если путь не из `venv\` — закройте терминал, откройте новый **с уже активированным venv** (`venv\Scripts\activate` в начале сессии), либо запускайте напрямую `.\venv\Scripts\python.exe -m pytest tests/`.
+
 ### Настройка
 
 Создайте `.env` файл:
@@ -37,7 +58,9 @@ ROUTERAI_KEY=sk-ra-your-key-here
 python router.py
 ```
 
-Откроется на `http://localhost:8765` (API) + админка `http://localhost:8765/admin`.
+> 🔌 **Single-port режим:** в текущей версии `single_port: true` — API и админка слушают **один и тот же порт `8765`**. Параметры `router_port` / `admin_port` в `config.yaml` зарезервированы под будущий split-режим и сейчас игнорируются.
+
+Откроется на `http://localhost:8765` (API + `http://localhost:8765/admin` — админка).
 
 ### Подключение в Zed
 
@@ -198,12 +221,13 @@ smart-routing/
 
 ### 🟢 P3 — Низкие
 
-| # | Проблема | Где | Суть |
-|---|----------|-----|------|
-| **15** | `Tuple[str, str]` return type | `router.py:480` | Для современных Python (3.12+) лучше `tuple[str, str]` |
-| **16** | Нет Request ID | — | Сложно трассировать запросы через систему |
-| **17** | Эмодзи в логах | `router.py:324` | `💰` — не во всех терминалах корректно |
-| **18** | Нет graceful shutdown для stats | `router.py:611` | Статистика теряется при перезапуске |
+| # | Проблема | Где | Статус |
+|---|----------|-----|--------|
+| **15** | `Tuple[str, str]` return type | `router.py:480` | — Для современных Python (3.12+) лучше `tuple[str, str]` |
+| ~~**16**~~ | ~~`@app.on_event("shutdown")` deprecated~~ | `router.py:899` | ✅ **Исправлено в f8edbb0** — заменён на `@asynccontextmanager lifespan`. В uvicorn ≥ 0.30 / FastAPI ≥ 0.110 прежний код падал с `TypeError: Router.__init__() got an unexpected keyword argument 'on_startup'`. |
+| **17** | Нет Request ID | — | — Сложно трассировать запросы через систему |
+| **18** | Эмодзи в логах | `router.py:324` | — `💰` — не во всех терминалах корректно |
+| **19** | Нет graceful shutdown для stats | `router.py:611` | — Статистика теряется при перезапуске |
 
 ---
 
@@ -266,68 +290,15 @@ AGENTS.md инструктирует Coordinator добавлять `[AGENT:data
 
 ---
 
-# 🚀 Quick Win — немедленное исправление sub-agent маршрутизации
-
-## Решение: Sub-agent fallback heuristic
-
-> **Идея**: Если system prompt fingerprinting **не нашёл Coordinator** (и не нашёл конкретного агента), значит это **sub-agent** → автоматически отправляем на `default_worker` (Flash/Qwen).
-
-```python
-# Новый шаг 2.5 (между system prompt fingerprint и agent tag):
-# «Sub-agent fallback»
-# Если system prompt короткий (< порога Coordinator) 
-# И fingerprint_system_prompt вернул None (не Coordinator)
-# → это sub-agent, используем default_worker
-```
-
-Это **trivially просто** и покрывает 100% sub-agent запросов, даже когда Coordinator забывает добавить `[AGENT:name]`.
-
-**Код изменения** (в `smart_route_model()`, после шага 2):
-
-```python
-# 2.5 Sub-agent detection (Quick Win)
-# Если system prompt не похож на Coordinator (короткий, не CalorIt) — 
-# это sub-agent → сразу default_worker
-if system_prompt and len(system_prompt) < COORDINATOR_PROMPT_THRESHOLD:
-    fingerprint = fingerprint_system_prompt(system_prompt)
-    if not fingerprint:
-        # Не Coordinator и не конкретный CalorIt agent
-        # → sub-agent от Zed → дешёвая модель
-        default = state.config.get("default_worker", "deepseek/deepseek-v4-flash")
-        return default, "Sub-agent (default_worker)"
-```
-
-## 🎯 Второй уровень — улучшение fingerprint_user_messages
-
-Расширить паттерны для естественного языка (не только file scopes):
-
-```python
-"database": [
-    # Существующие технические паттерны:
-    (re.compile(r"database/\*\.py", re.IGNORECASE), 12),
-    (re.compile(r"SQLAlchemy\s+models", re.IGNORECASE), 10),
-    # НОВЫЕ: естественный язык от Coordinator'а
-    (re.compile(r"миграци|migration|alembic", re.IGNORECASE), 8),
-    (re.compile(r"таблиц|table|CREATE\s+TABLE", re.IGNORECASE), 7),
-    (re.compile(r"CRUD|create.*read.*update.*delete", re.IGNORECASE), 6),
-    (re.compile(r"модел[ьи]|model.*SQLAlchemy", re.IGNORECASE), 6),
-],
-```
-
-Подобные естественно-языковые паттерны для всех 10 агентов.
-
----
-
 # 🔧 План развития v1.5 → v2.0
 
 ```
 Week 1 ──────────────────────────────────────────────────────────
-🔴 P0  ├── Quick Win: sub-agent fallback heuristic
-🔴 P0  ├── Расширение fingerprint_user_messages (естественный язык)
 🔴 P0  ├── Дехардкод Coordinator fallback (гибкая смена через админку)
 🟠 P1  ├── GET /v1/models (требуется Zed)
 🟠 P1  ├── Автосписок моделей из RouterAI + OpenRouter
-       └── Тесты на fingerprinting (pytest)
+       └── Тесты на fingerprinting (pytest) [уже 172/172 ✅]
+       (sub-agent fallback — см. «Отклонено» ниже)
 
 Week 2 ──────────────────────────────────────────────────────────
 🟠 P1  ├── Динамические цены моделей через админку
@@ -360,19 +331,23 @@ Month 2+ ───────────────────────�
 - [x] Админ-панель: логи + агенты + провайдеры
 - [x] Сохранение провайдеров + API-ключей из админки
 - [x] config.yaml + routing.json
-- [ ] **🔴 P0: Sub-agent fallback heuristic**
-- [ ] **🔴 P0: fingerprint_user_messages — естественный язык**
+- [x] **🟢 P3 #16: lifespan вместо `@app.on_event` (f8edbb0)** ✅
 - [ ] **🔴 P0: Дехардкод Coordinator fallback**
 - [ ] `GET /v1/models`
 - [ ] Автосписок моделей провайдеров
 - [ ] Динамические цены в админке
-- [ ] Разделение портов router/admin
+- [ ] Разделение портов router/admin (сейчас single_port=true → 8765)
 - [ ] Provider failover
-- [ ] Тесты (pytest)
-- [ ] Rate limiting
-- [ ] JSON-логи
-- [ ] Docker
+- [ ] Rate limiting (P1)
+- [ ] JSON-логи (P1)
+- [ ] Docker (P2)
+- [ ] CORS middleware (P2)
+- [ ] Persistent stats (P2)
 - [ ] Smart Router v2 (Agent Framework + Skills)
+
+### ❌ Отклонено
+
+- ~~**Шаг 2.5 — sub-agent fallback heuristic**~~ (см. раздел «📋 Что нового»). Coordinator в Zed — главный thread чата, а не роль роутера. Связка `[AGENT:name]` → `agent_to_worker_mapping` остаётся единственным каналом маршрутизации sub-agent'ов.
 
 ---
 

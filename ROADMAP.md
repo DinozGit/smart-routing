@@ -132,28 +132,19 @@ curl -s -X POST http://localhost:8765/v1/chat/completions -H "Content-Type: appl
 
 ## 🔴 P0 — Немедленно (текущий спринт)
 
-### 1.1 Quick Win: Sub-agent fallback (3 строки)
+### ~~1.1 Quick Win: Sub-agent fallback (3 строки)~~ ❌ ОТКЛОНЁН (2026-07-01)
 
-```python
-# После fingerprint_system_prompt(), до agent tag
-if system_prompt and len(system_prompt) < COORDINATOR_PROMPT_THRESHOLD:
-    fp = fingerprint_system_prompt(system_prompt)
-    if not fp:
-        # Не Coordinator и не CalorIt-агент → sub-agent → default_worker
-        return state.config["default_worker"], "Sub-agent (default_worker)"
-```
+**Причина отклонения:** Coordinator в Zed — это не роль SmartRouter'а, а **главный thread чата**, который сам spawn'ит sub-agent'ов через `[AGENT:name]` тег. Текущая архитектура маршрутизации работает стабильно:
 
-**Эффект:** 100% sub-agent запросов → Flash (экономия 90%).
+- Coordinator в Zed → Coordinator-модель (deepseek-v4-pro / minimax-m3)
+- Sub-agent `[AGENT:database]` → worker_default (deepseek-v4-flash)
+- Sub-agent `[AGENT:mobile]` → worker_img (qwen3-coder-next)
 
-### 1.2 Расширение fingerprint_user_messages (естественный язык)
+Heuristic "короткий system prompt → default_worker" **отклонён**, т.к. может сломать короткие Coordinator-промпты (например, через CLI). Если Coordinator забудет тег `[AGENT:name]` — лучше чинить Coordinator'а, чем скрывать баг эвристикой.
 
-Добавить паттерны на русском и естественном языке для всех 10 агентов:
-- `"миграци|migration|таблиц|CREATE TABLE"` → database
-- `"тест|test|напиши тест|покрыти"` → tests
-- `"эндпоинт|endpoint|роут|fastapi"` → api
-- и т.д.
+### ~~1.2 Расширение fingerprint_user_messages (естественный язык)~~ ❌ ОТКЛОНЁН (2026-07-01)
 
-**Эффект:** fingerprinting срабатывает на обычных задачах от Coordinator'а.
+**Причина отклонения:** Fingerprinting естественного языка не нужен при рабочей схеме `[AGENT:name]` — Coordinator в Zed **всегда** отправляет тег (правило зафиксировано в `AGENTS.md`). Маршрутизация по тегу работает стабильно и однозначна; эвристика по user messages добавляет ложные срабатывания и неопределённость.
 
 ### 1.3 GET /v1/models
 
@@ -571,9 +562,9 @@ class SkillEngine:
 
 ```
 Сейчас ──────────────────────────────────────────────────────
-🔴 P0  ├── Quick Win: sub-agent fallback (3 строки)
-🔴 P0  ├── fingerprint_user_messages — естественный язык
-🔴 P0  ├── GET /v1/models
+🔴 P0  ├── ✅ GET /v1/models (готов)
+🔴 P0  ├── 🆕 Реальные цены моделей в config.yaml (была дефолтная заглушка)
+🔴 P0  ├── 🆕 Hot-reload server.* параметров (single_port)
        └── Создание структуры 3 ролей в конфиге
 
 Неделя 1-2 ─────────────────────────────────────────────────
@@ -581,13 +572,14 @@ class SkillEngine:
 🟠 P1  ├── Fallback chain
 🟠 P1  ├── Разделение портов
 🟠 P1  ├── Fine tuning в админке (параметры + промпты)
-       └── Динамические цены моделей
+🟠 P1  ├── Динамические цены моделей
+🟠 P1  └── Structured Logging (JSON-логи + Request ID)
 
 Неделя 3-4 ─────────────────────────────────────────────────
 🟡 P2  ├── Provider failover (RouterAI → OpenRouter)
+🟡 P2  ├── Rate limiting
 🟡 P2  ├── Тесты (pytest)
-🟡 P2  ├── Docker
-       └── JSON-логи + Request ID
+🟡 P2  └── Docker
 
 Месяц 2+ ───────────────────────────────────────────────────
 🟢 P3  ├── Smart Router v2 — Agent Framework
@@ -595,6 +587,8 @@ class SkillEngine:
 🟢 P3  ├── CLI (`sr chat`)
        └── Prometheus metrics
 ```
+
+> ❌ Снято с приоритета (отклонено 2026-07-01): sub-agent fallback heuristic (Step 1.1), fingerprint_user_messages — естественный язык (Step 1.2). Coordinator в Zed маршрутизирует sub-agent'ов через `[AGENT:name]` тег — эвристика не нужна и может ломать короткие Coordinator-промпты.
 
 ---
 
@@ -628,3 +622,6 @@ class SkillEngine:
 - [ ] 🟢 P3: Smart Router v2 — Agent Framework
 - [ ] 🟢 P3: Skill Prompting Engine
 - [ ] 🟢 P3: CLI
+- [x] **🔧 Fix FastAPI startup: replace deprecated `@app.on_event("shutdown")` with `@asynccontextmanager` lifespan** (commit f8edbb0)
+- [x] **🔍 Code review SmartRouter** (2026-07-01): выявлены P1-P3, подтверждена стабильная работа архитектуры `[AGENT:name]` → role mapping
+- [ ] ~~🔴 Step 2.5 (sub-agent fallback heuristic)~~ → ❌ ОТКЛОНЁН 2026-07-01 (Coordinator в Zed сам маршрутизирует через `[AGENT:name]`, эвристика не нужна)

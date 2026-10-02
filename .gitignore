@@ -23,3 +23,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Auto-generated cache (refreshed via POST /models/sync)
+models_cache.json
