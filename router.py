@@ -76,6 +76,10 @@ BLACKLIST = set(cfg.get("api_blacklist", []))
 # Строим PRICES из config.yaml
 PRICES = {}
 for model_name, model_cfg in cfg.get("models", {}).items():
+    # Запись только с метаданными (без input_price/output_price) пропускаем —
+    # цена будет браться из живого каталога провайдера при Sync.
+    if "input_price" not in model_cfg or "output_price" not in model_cfg:
+        continue
     PRICES[model_name] = {
         "input": model_cfg["input_price"],
         "output": model_cfg["output_price"],

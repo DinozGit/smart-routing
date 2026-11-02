@@ -16,37 +16,30 @@ logging:
 models:
   routerai::deepseek/deepseek-v4-flash:
     emoji: ⚡
-    input_price: 9.157
-    output_price: 18.3141
     provider: RouterAI
     role: Worker
-    currency: RUB
   routerai::deepseek/deepseek-v4-pro:
     emoji: 🧠
-    input_price: 61.9626
-    output_price: 123.9251
     provider: RouterAI
     role: Coordinator
-    currency: RUB
   routerai::qwen/qwen3-coder-next:
     emoji: 💻
-    input_price: 11.1919
-    output_price: 81.3958
     provider: RouterAI
     role: Frontend
-    currency: RUB
   routerai::z-ai/glm-5.2:
     emoji: 🧪
-    input_price: 94.6226
-    output_price: 305.2343
     provider: RouterAI
     role: Coordinator
-    currency: RUB
-  # Пример override'а только для одного провайдера (цена в валюте этого провайдера):
-  # openrouter::deepseek/deepseek-v4-pro:
-  #   input_price: 1.6
-  #   output_price: 4.8
-  #   currency: USD
+  # Ручная цена (override) — нужна для моделей, которых НЕТ в каталоге
+  # провайдера: свой прокси, self-hosted, спец-условия. Цена за 1M токенов.
+  # Если модель есть в каталоге — цена подтянется оттуда сама и будет свежей.
+  # myproxy::my-private-model:
+  #   emoji: 🔒
+  #   input_price: 12.5
+  #   output_price: 50.0
+  #   currency: RUB
+  #   provider: MyProxy
+  #   role: Worker
 
 providers:
   routerai:

@@ -106,31 +106,105 @@ class TestBug1CrossProviderPriceLeak:
             f"RUB should not be in by_currency: {by_currency}"
         )
 
-    def test_routerai_glm_uses_routerai_override(self):
+    def test_manual_price_overrides_catalog(self):
         """
-        routerai::z-ai/glm-5.2 → PRICES содержит 'routerai::z-ai/glm-5.2'
-        (manual override из config.yaml: 94.6226 / 305.2343 RUB).
+        Случай A: есть ручная цена в PRICES → она побеждает каталог.
+
+        Ручная цена инжектится в PRICES прямо в тесте, поэтому тест
+        не зависит от содержимого config.yaml. После проверки PRICES
+        восстанавливается в исходное состояние.
+
+        log_usage() не сохраняет price_source в stats (это локальная
+        переменная), поэтому «manual» проверяем по наблюдаемому контракту:
+        ключ присутствует в PRICES, а cost посчитан по ручным числам,
+        которые заведомо отличаются от каталога.
         """
         self._setup_glm_catalog()
         self._reset_stats()
 
-        router.log_usage("routerai::z-ai/glm-5.2", 1_000_000, 500_000)
+        key = "routerai::z-ai/glm-5.2"
+        manual_input = 999.0
+        manual_output = 1999.0
+        manual_price = {
+            "input": manual_input,
+            "output": manual_output,
+            "provider": "RouterAI",
+            "emoji": "🧪",
+            "role": "Coordinator",
+            "currency": "RUB",
+        }
 
-        # PRICES override: input=94.6226, output=305.2343, currency=RUB
-        # cost = (1M*94.6226 + 0.5M*305.2343) / 1M = 94.6226 + 152.61715 = 247.23975 RUB
-        expected_cost_rub = 247.23975
+        sentinel = object()
+        orig_price = router.PRICES.get(key, sentinel)
+        router.PRICES[key] = manual_price
+        try:
+            router.log_usage(key, 1_000_000, 500_000)
+
+            # cost = (1M*999 + 0.5M*1999) / 1M = 999 + 999.5 = 1998.5 RUB
+            expected_cost_rub = (
+                1_000_000 * manual_input + 500_000 * manual_output
+            ) / 1_000_000
+            by_currency = router.state.stats["by_currency"]
+            assert by_currency.get("RUB", 0) == pytest.approx(
+                expected_cost_rub, rel=1e-6
+            ), f"Expected RUB cost {expected_cost_rub}, got {by_currency}"
+            # total_cost в RUB (factor=1.0)
+            assert router.state.stats["total_cost"] == pytest.approx(
+                expected_cost_rub, rel=1e-6
+            )
+            assert "USD" not in by_currency
+
+            # Ручная цена действительно отличается от каталога — значит
+            # победил именно PRICES, а не каталог провайдера.
+            catalog = router.state.get_model_info("z-ai/glm-5.2", "routerai")
+            assert catalog is not None
+            assert catalog["input_price_1m"] != manual_input
+            assert catalog["output_price_1m"] != manual_output
+        finally:
+            if orig_price is sentinel:
+                router.PRICES.pop(key, None)
+            else:
+                router.PRICES[key] = orig_price
+
+    def test_without_manual_price_uses_provider_catalog(self):
+        """
+        Случай B: нет ручной цены → цена берётся из каталога провайдера.
+
+        Значения не хардкодятся — берутся из state.get_model_info(),
+        поэтому тест стабилен при изменении цен провайдером.
+        """
+        self._setup_glm_catalog()
+        self._reset_stats()
+
+        key = "routerai::z-ai/glm-5.2"
+        # Ручной цены нет — источником должен стать каталог.
+        assert key not in router.PRICES
+
+        catalog = router.state.get_model_info("z-ai/glm-5.2", "routerai")
+        assert catalog is not None
+        assert catalog["price_source"] == "api"
+
+        router.log_usage(key, 1_000_000, 500_000)
+
+        # cost = (1M*input_price_1m + 0.5M*output_price_1m) / 1M
+        expected_cost_rub = (
+            1_000_000 * catalog["input_price_1m"]
+            + 500_000 * catalog["output_price_1m"]
+        ) / 1_000_000
         by_currency = router.state.stats["by_currency"]
-        assert by_currency.get("RUB", 0) == pytest.approx(expected_cost_rub, rel=1e-4), (
-            f"Expected RUB cost {expected_cost_rub}, got {by_currency}"
-        )
+        assert by_currency.get("RUB", 0) == pytest.approx(
+            expected_cost_rub, rel=1e-6
+        ), f"Expected RUB cost {expected_cost_rub}, got {by_currency}"
         # total_cost в RUB (factor=1.0)
-        assert router.state.stats["total_cost"] == pytest.approx(expected_cost_rub, rel=1e-4)
+        assert router.state.stats["total_cost"] == pytest.approx(
+            expected_cost_rub, rel=1e-6
+        )
         assert "USD" not in by_currency
 
     def test_openrouter_deepseek_pro_uses_openrouter_catalog(self):
         """
         openrouter::deepseek/deepseek-v4-pro → цена из каталога openrouter (USD),
-        а НЕ из PRICES (где есть только routerai::deepseek/deepseek-v4-pro).
+        а НЕ из каталога routerai (default_provider).
         """
         router.state.available_models = {
             "openrouter::deepseek/deepseek-v4-pro": {

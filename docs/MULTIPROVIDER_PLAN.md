@@ -3,7 +3,7 @@
 > **Статус:** ✅ **Phase 1 + Phase 2 реализованы (2026-11).** Phase 3–5 — частично, см. таблицу фаз.
 > **Цель:** Provider-agnostic роутер. Любой OpenAI-совместимый провайдер подключается через админку, его модели сканируются и назначаются на Coordinator/Worker роли — независимо от провайдера.
 >
-> **Контракт реализации:** [`docs/PROVIDER_CONTRACT.md`](docs/PROVIDER_CONTRACT.md) — источник правды
+> **Контракт реализации:** [`PROVIDER_CONTRACT.md`](PROVIDER_CONTRACT.md) — источник правды
 > по форматам каталога, ключам `provider::model_id`, валютам и API.
 
 ---
@@ -469,4 +469,4 @@ def parse_pricing(pricing: dict, units: dict, mode: str) -> tuple[float, float, 
 ---
 
 *План создан 2026-07-01 на основе реального API RouterAI.
-Phase 1 + Phase 2 реализованы 2026-11-02 (см. `docs/PROVIDER_CONTRACT.md` и `ROADMAP.md`).*
+Phase 1 + Phase 2 реализованы 2026-11-02 (см. [`PROVIDER_CONTRACT.md`](PROVIDER_CONTRACT.md) и [`ROADMAP.md`](ROADMAP.md)).*

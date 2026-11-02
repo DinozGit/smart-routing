@@ -72,7 +72,7 @@
 │                                                             │
 │ 6. 📝 Docs — обновление документации                        │
 │    ├── README.md — если изменились user-facing функции      │
-│    ├── ROADMAP.md — отметить шаг как выполненный            │
+│    ├── docs/ROADMAP.md — отметить шаг как выполненный      │
 │    └── AGENTS.md — если изменились правила маршрутизации    │
 │                                                             │
 │ 7. 🤝 Согласование — ты проверяешь                          │
@@ -687,7 +687,7 @@ class SkillEngine:
 - [ ] ~~🔴 Step 2.5 (sub-agent fallback heuristic)~~ → ❌ ОТКЛОНЁН 2026-07-01 (Coordinator в Zed сам маршрутизирует через `[AGENT:name]`, эвристика не нужна)
 - [x] **🔌 Transport hardening: ретраи при сетевых/SSL-ошибках, connect-таймаут 20 с, per-provider `verify_ssl` / `ca_bundle`, честный текст ошибки в SSE** (commit 66204a2, 2026-11)
 - [x] **🔐 P0: атомарная запись конфигов** — `*.tmp` + `os.replace()`, битый `routing.json` сохраняется как `*.broken` и не перезаписывается дефолтами (commit 04d1fd8, 2026-11)
-- [x] **📚 План мультипровайдерной переработки** — `MULTIPROVIDER_PLAN.md` (commit ec52f46)
+- [x] **📚 План мультипровайдерной переработки** — [`docs/MULTIPROVIDER_PLAN.md`](MULTIPROVIDER_PLAN.md) (commit ec52f46)
 - [x] **📊 Итого: 198 тестов, все зелёные** (`pytest tests/ -q`)
 - [x] **🧪 Phase 1 — каталог моделей по провайдерам** (+ фильтрация text→text, миграция кеша v1→v2, pricing-адаптеры, валюты) ✅ 2026-11
 - [x] **🧪 Phase 2 — `resolve_model_spec`, ключи `provider::model_id`, провайдер определяется по модели** ✅ 2026-11

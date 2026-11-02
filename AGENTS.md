@@ -65,7 +65,7 @@ spawn_agent("🔧 API", "[AGENT:api] Добавь эндпоинт POST /models/
 | **frontend** | `admin.html` | Веб-админка (vanilla JS, без бандлера) |
 | **tests** | `tests/` | Pytest, unit & integration, регресс-тесты |
 | **devops** | `config.yaml`, `Dockerfile`, `docker-compose*.yml`, `nginx*.conf`, `.github/` | Конфигурация, Docker, CI/CD, деплой |
-| **coordinator** | `docs/`, `README.md`, `ROADMAP.md`, `MULTIPROVIDER_PLAN.md` | Декомпозиция, ревью, документация, координация |
+| **coordinator** | `docs/`, `README.md`, `SECURITY.md` | Декомпозиция, ревью, документация, координация |
 
 **Никто не трогает чужие файлы.** Если нужен чужой change — опиши его в отчёте, но не делай.
 

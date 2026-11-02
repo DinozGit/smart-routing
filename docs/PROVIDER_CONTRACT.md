@@ -443,6 +443,6 @@ state.stats = {
 | `devops` | `config.yaml` | Phase 1 |
 | `frontend` | `admin.html` | Phase 1 → Phase 2 |
 | `tests` | `tests/phase5/`, правка существующих тестов | Phase 1 → Phase 2 |
-| Coordinator | `docs/`, `README.md`, `ROADMAP.md`, `MULTIPROVIDER_PLAN.md` | ревью + доки |
+| Coordinator | `docs/`, `README.md`, `SECURITY.md` | ревью + доки |
 
 **Никто не трогает чужие файлы.**
