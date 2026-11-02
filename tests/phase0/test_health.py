@@ -14,20 +14,20 @@ class TestHealth:
         assert data["status"] == "ok"
 
     async def test_health_has_cost(self, client):
-        """GET /health содержит поле cost."""
+        """GET /health содержит поле cost (без символа $)."""
         resp = await client.get("/health")
         data = resp.json()
         assert "cost" in data
         assert isinstance(data["cost"], str)
-        assert data["cost"].startswith("$")
+        assert not data["cost"].startswith("$")
+        assert float(data["cost"]) >= 0.0
 
     async def test_health_cost_format(self, client):
-        """Формат cost: $0.0000."""
+        """Формат cost: 0.0000 (без $)."""
         resp = await client.get("/health")
         data = resp.json()
-        # Проверяем что парсится как float после $
-        cost_str = data["cost"].lstrip("$")
-        cost = float(cost_str)
+        # Проверяем что парсится как float
+        cost = float(data["cost"])
         assert cost >= 0.0
 
 
@@ -53,22 +53,22 @@ class TestModels:
             assert "owned_by" in model
 
     async def test_v1_models_contains_flash(self, client):
-        """В списке есть deepseek/deepseek-v4-flash."""
+        """В списке есть routerai::deepseek/deepseek-v4-flash."""
         resp = await client.get("/v1/models")
         data = resp.json()
         ids = [m["id"] for m in data["data"]]
-        assert "deepseek/deepseek-v4-flash" in ids
+        assert "routerai::deepseek/deepseek-v4-flash" in ids
 
     async def test_v1_models_contains_pro(self, client):
-        """В списке есть deepseek/deepseek-v4-pro."""
+        """В списке есть routerai::deepseek/deepseek-v4-pro."""
         resp = await client.get("/v1/models")
         data = resp.json()
         ids = [m["id"] for m in data["data"]]
-        assert "deepseek/deepseek-v4-pro" in ids
+        assert "routerai::deepseek/deepseek-v4-pro" in ids
 
     async def test_v1_models_contains_qwen(self, client):
-        """В списке есть qwen/qwen3-coder-next."""
+        """В списке есть routerai::qwen/qwen3-coder-next."""
         resp = await client.get("/v1/models")
         data = resp.json()
         ids = [m["id"] for m in data["data"]]
-        assert "qwen/qwen3-coder-next" in ids
+        assert "routerai::qwen/qwen3-coder-next" in ids

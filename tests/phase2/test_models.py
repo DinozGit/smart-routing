@@ -99,54 +99,66 @@ class TestV1ModelsUnion:
     """GET /v1/models — объединение config.yaml + кеш."""
 
     async def test_returns_config_models(self, client):
-        """Модели из config.yaml всегда есть."""
+        """Модели из config.yaml всегда есть (составные ID)."""
         resp = await client.get("/v1/models")
         data = resp.json()
         ids = [m["id"] for m in data["data"]]
-        # Из config.yaml
-        assert "deepseek/deepseek-v4-flash" in ids
-        assert "deepseek/deepseek-v4-pro" in ids
+        # Из config.yaml — теперь с префиксом провайдера
+        assert "routerai::deepseek/deepseek-v4-flash" in ids
+        assert "routerai::deepseek/deepseek-v4-pro" in ids
 
     async def test_returns_cached_models(self, client, monkeypatch):
-        """Модели из кеша добавляются к config.yaml."""
+        """Модели из кеша добавляются к config.yaml (составные ID)."""
         monkeypatch.setattr(
             router.state,
             "available_models",
             {
-                "test/cached-model": {
+                "routerai::test/cached-model": {
                     "id": "test/cached-model",
                     "name": "Test Cached",
                     "context_length": 4096,
                     "input_price_1m": 1.0,
                     "output_price_1m": 2.0,
+                    "provider": "routerai",
                 }
             },
+        )
+        monkeypatch.setattr(
+            router.state,
+            "models_by_provider",
+            {"routerai": ["test/cached-model"]},
         )
         resp = await client.get("/v1/models")
         data = resp.json()
         ids = [m["id"] for m in data["data"]]
-        assert "test/cached-model" in ids
+        assert "routerai::test/cached-model" in ids
 
     async def test_no_duplicates(self, client, monkeypatch):
-        """Модель из config.yaml не дублируется."""
+        """Модель из config.yaml не дублируется (составные ID)."""
         # Добавим в кеш модель, которая уже есть в config.yaml
         monkeypatch.setattr(
             router.state,
             "available_models",
             {
-                "deepseek/deepseek-v4-flash": {
+                "routerai::deepseek/deepseek-v4-flash": {
                     "id": "deepseek/deepseek-v4-flash",
                     "name": "Flash (cached)",
                     "context_length": 1048576,
                     "input_price_1m": 9.0,
                     "output_price_1m": 18.0,
+                    "provider": "routerai",
                 }
             },
+        )
+        monkeypatch.setattr(
+            router.state,
+            "models_by_provider",
+            {"routerai": ["deepseek/deepseek-v4-flash"]},
         )
         resp = await client.get("/v1/models")
         data = resp.json()
         ids = [m["id"] for m in data["data"]]
-        assert ids.count("deepseek/deepseek-v4-flash") == 1
+        assert ids.count("routerai::deepseek/deepseek-v4-flash") == 1
 
 
 class TestLogUsageWithCache:
@@ -178,20 +190,16 @@ class TestLogUsageWithCache:
             r.state.stats = orig_stats
 
     def test_log_usage_fallback_when_not_anywhere(self):
-        """Модель ни в PRICES, ни в кеше → default цены."""
+        """Модель ни в PRICES, ни в кеше → цена 0 (дельтой)."""
         import router as r
 
-        orig_stats = dict(r.state.stats)
-        try:
-            r.PRICES.pop("ghost/model", None)
-            r.state.available_models = {}
+        r.PRICES.pop("ghost/model", None)
+        r.state.available_models = {}
 
-            r.log_usage("ghost/model", 100, 50)
-
-            # default: (100 * 0.5 + 50 * 1.5) / 1M
-            assert r.state.stats["total_cost"] > 0
-        finally:
-            r.state.stats = orig_stats
+        before = r.state.stats["total_cost"]
+        r.log_usage("ghost/model", 100, 50)
+        # неизвестная модель даёт 0, поэтому total_cost не меняется
+        assert r.state.stats["total_cost"] == before
 
 
 class TestCacheCorruption:

@@ -8,41 +8,90 @@ api_blacklist:
   - gpt-4-turbo-preview
   - gpt-4-32k
   - text-davinci
+
 logging:
   level: INFO
   max_entries: 500
+
 models:
-  deepseek/deepseek-v4-flash:
+  routerai::deepseek/deepseek-v4-flash:
     emoji: ⚡
-    input_price: 0.05
-    output_price: 0.2
+    input_price: 9.157
+    output_price: 18.3141
     provider: RouterAI
     role: Worker
-  deepseek/deepseek-v4-pro:
+    currency: RUB
+  routerai::deepseek/deepseek-v4-pro:
     emoji: 🧠
-    input_price: 0.5
-    output_price: 1.5
+    input_price: 61.9626
+    output_price: 123.9251
     provider: RouterAI
     role: Coordinator
-  qwen/qwen3-coder-next:
+    currency: RUB
+  routerai::qwen/qwen3-coder-next:
     emoji: 💻
-    input_price: 0.11
-    output_price: 0.84
+    input_price: 11.1919
+    output_price: 81.3958
     provider: RouterAI
     role: Frontend
-  z-ai/glm-5.2:
+    currency: RUB
+  routerai::z-ai/glm-5.2:
     emoji: 🧪
-    input_price: 0.2
-    output_price: 0.6
+    input_price: 94.6226
+    output_price: 305.2343
     provider: RouterAI
     role: Coordinator
+    currency: RUB
+  # Пример override'а только для одного провайдера (цена в валюте этого провайдера):
+  # openrouter::deepseek/deepseek-v4-pro:
+  #   input_price: 1.6
+  #   output_price: 4.8
+  #   currency: USD
+
 providers:
   routerai:
-    api_key_env: ROUTERAI_KEY
-    base_url: https://routerai.ru/api/v1/chat/completions
-    default: true
     display_name: RouterAI
+    base_url: https://routerai.ru/api/v1/chat/completions
     models_endpoint: https://routerai.ru/api/v1/models
+    api_key_env: ROUTERAI_KEY
+    requires_api_key: true
+    pricing_mode: auto
+    default: true
+    verify_ssl: true
+    ca_bundle: ""
+    extra_headers: {}
+  openrouter:
+    display_name: OpenRouter
+    base_url: https://openrouter.ai/api/v1/chat/completions
+    models_endpoint: https://openrouter.ai/api/v1/models
+    api_key_env: OPENROUTER_API_KEY
+    requires_api_key: true
+    pricing_mode: auto
+    default: false
+    verify_ssl: true
+    ca_bundle: ""
+    extra_headers:
+      HTTP-Referer: https://github.com/smart-routing/smart-router
+      X-Title: SmartRouter
+  ollama:
+    display_name: Ollama (local)
+    base_url: http://localhost:11434/v1/chat/completions
+    models_endpoint: http://localhost:11434/api/tags
+    api_key_env: ""
+    requires_api_key: false
+    pricing_mode: free
+    default: false
+    verify_ssl: true
+    ca_bundle: ""
+    extra_headers: {}
+
+currency:
+  base: RUB
+  usd_rate: 90.0
+  rates:
+    RUB: 1.0
+    USD: 0.011111
+
 roles:
   coordinator:
     name: "🧠 Coordinator"
@@ -81,11 +130,7 @@ roles:
       tools: true
       images: true
       max_tokens: 262144
-routing:
-  coordinator_prompt_threshold: 3000
-  heuristic_threshold: 2
-  min_fingerprint_score: 10
-  min_scope_score: 8
+
 server:
   admin_host: 127.0.0.1
   admin_port: 8766

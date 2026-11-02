@@ -496,19 +496,22 @@ pytest tests/ -v
 pytest tests/phase4/ -v
 ```
 
-#### Phase 5 — Мультипровайдерность (в работе)
+#### Phase 5 — Мультипровайдерность ✅ (2026-11)
 
 | Тест | Что проверяет | Критерий успеха |
-|------|-------------|----------------|
-| `test_provider_catalog.py` | Каталог моделей по провайдерам, фильтрация text→text, миграция формата кеша | — |
-| `test_resolve_model_spec.py` | `provider::model_id` → `(provider, model_id)`, bare-ID → каталог → `default_provider` | — |
-| `test_provider_proxy.py` | Проксирование к правильному провайдеру, ключ из модели, `body["model"]` без префикса | — |
-| `test_currency_pricing.py` | Цены и валюты: ₽ из RouterAI, USD из OpenRouter, free для Ollama | — |
+|------|---------------|-----------------|
+| `test_provider_catalog.py` | Каталог моделей по провайдерам, фильтрация text→text, миграция формата кеша | 21 тест |
+| `test_resolve_model_spec.py` | `provider::model_id` → `(provider, model_id)`, bare-ID → каталог → `default_provider` | 9 тестов |
+| `test_provider_proxy.py` | Проксирование к правильному провайдеру, ключ из модели, `body["model"]` без префикса | 14 тестов |
+| `test_currency_pricing.py` | Цены и валюты: ₽ из RouterAI, USD из OpenRouter, free для Ollama | 10 тестов |
+| `test_regressions.py` | Регресс-тесты на 4 бага, найденных ручным прогоном | 16 тестов |
 
 ```bash
 # После Phase 5:
 pytest tests/phase5/ -v
 ```
+
+**Итого: 243 теста, все зелёные** (`pytest tests/ -q`).
 
 #### Phase 6 — Docker + Production
 
@@ -623,11 +626,11 @@ class SkillEngine:
 🔴 P0  └── ✅ Transport hardening: ретраи + таймауты + per-provider SSL (2026-11)
 
 Спринт 2026-11 ───────────────────────────────────────────────
-🟠 P1  ├── Phase 1 — каталог моделей по провайдерам (+ фильтрация)
-🟠 P1  ├── Phase 2 — resolve_model_spec: provider::model_id
-🟠 P1  ├── Phase 3 — cross-provider fallback (Спринт 2)
-🟠 P1  ├── Phase 4 — цены / валюты / лимиты (Спринт 2)
-🟠 P1  └── Phase 5 — UX админки (Спринт 3)
+🟠 P1  ├── Phase 1 — каталог моделей по провайдерам (+ фильтрация)   ✅
+🟠 P1  ├── Phase 2 — resolve_model_spec: provider::model_id          ✅
+🟠 P1  ├── Phase 3 — cross-provider fallback                        🟡 частично
+🟠 P1  ├── Phase 4 — цены / валюты / лимиты                        🟡 частично
+🟠 P1  └── Phase 5 — UX админки                                     🟡 частично
 
 Неделя 1-2 (исторический план) ─────────────────────────────
 🟠 P1  ├── Три роли: Coordinator / Worker / Worker Img          ✅
@@ -686,14 +689,16 @@ class SkillEngine:
 - [x] **🔐 P0: атомарная запись конфигов** — `*.tmp` + `os.replace()`, битый `routing.json` сохраняется как `*.broken` и не перезаписывается дефолтами (commit 04d1fd8, 2026-11)
 - [x] **📚 План мультипровайдерной переработки** — `MULTIPROVIDER_PLAN.md` (commit ec52f46)
 - [x] **📊 Итого: 198 тестов, все зелёные** (`pytest tests/ -q`)
-- [ ] 🟠 P1: **Phase 1 — каталог моделей по провайдерам** (+ фильтрация text→text)
-- [ ] 🟠 P1: **Phase 2 — `resolve_model_spec`, ключи `provider::model_id`, провайдер определяется по модели**
-- [ ] 🟠 P1: **Phase 3 — cross-provider fallback** (Спринт 2)
-- [ ] 🟠 P1: **Phase 4 — цены, валюты, лимиты** (Спринт 2)
-- [ ] 🟡 P2: **Phase 5 — UX админки** (тест соединения, счётчики моделей, фильтры) (Спринт 3)
+- [x] **🧪 Phase 1 — каталог моделей по провайдерам** (+ фильтрация text→text, миграция кеша v1→v2, pricing-адаптеры, валюты) ✅ 2026-11
+- [x] **🧪 Phase 2 — `resolve_model_spec`, ключи `provider::model_id`, провайдер определяется по модели** ✅ 2026-11
+- [x] **🧹 Удаление мёртвого fingerprint-кода** (~317 строк + тесты) ✅ 2026-11
+- [x] **🐛 4 бага, найденных ручным прогоном** (цена чужого провайдера, смешение валют в `total_cost`, затирание ролей в `POST /config`, двойной префикс в `/v1/models`) ✅ 2026-11
+- [ ] 🟠 P1: **Phase 3 — cross-provider fallback** (цепочка уже умеет уходить на другого провайдера; нужен UI для `role_fallbacks` и явная логика 5xx/таймаутов)
+- [ ] 🟠 P1: **Phase 4 — остатки**: авто-курс валют (4.6), лимиты, `context_length` → cap `max_tokens` для всех провайдеров (4.7)
+- [ ] 🟡 P2: **Phase 5 — UX админки — остатки**: показать курс и сумму в USD в UI, бейдж цен по провайдерам
 - [ ] 🟡 P2: Rate limiting
 - [ ] 🟡 P2: JSON-логи + Request ID
-- [ ] 🟢 P3: **Переход на БД** — только при появлении истории затрат по дням, >1 параллельного писателя, аудит-трейла конфига или >10K моделей
+- [ ] 🟢 P3: **Переход на БД** — только при появлении истории расходов по дням, >1 параллельного писателя, аудит-трейла конфига или >10K моделей
 
 ---
 
@@ -723,11 +728,11 @@ class SkillEngine:
 | Фаза | Что | Статус |
 |-------|-----|--------|
 | **Phase 0** | Атомарная запись конфигов | ✅ 2026-11 (`04d1fd8`) |
-| **Phase 1** | Каталог моделей по провайдерам: `state.models_by_provider`, адаптеры цен (`per_token_rub` / `per_token_usd` / `free`), фильтрация text→text, миграция формата кеша, `POST /models/sync` с параметром `provider`, колонка Provider в админке | ⏳ **следующий** |
-| **Phase 2** | `resolve_model_spec(spec) -> (provider, model_id)`; `proxy()` берёт URL и ключ **из модели**, а не из глобального провайдера; `body["model"]` уходит без префикса `provider::`; `log_usage()` по составному ключу с валютой; `role_fallbacks` в `routing.json`; `<optgroup>` в выпадающих списках ролей | ⏳ далее |
-| **Phase 3** | Cross-provider fallback | ⏳ Спринт 2 |
-| **Phase 4** | Цены / валюты / лимиты | ⏳ Спринт 2 |
-| **Phase 5** | UX админки: тест соединения, счётчики моделей, фильтры | ⏳ Спринт 3 |
+| **Phase 1** | Каталог моделей по провайдерам: `state.models_by_provider`, адаптеры цен (`auto` / `per_token_rub` / `per_token_usd` / `free`), фильтрация text→text, миграция кеша v1→v2, `POST /models/sync` с параметром `provider`, колонка Provider в админке | ✅ 2026-11 |
+| **Phase 2** | `resolve_model_spec(spec) -> (provider, model_id)`; `proxy()` берёт URL и ключ **из модели**, а не из глобального провайдера; `body["model"]` уходит без префикса `provider::`; `log_usage()` по составному ключу с валютой; `role_fallbacks` в `routing.json`; `<optgroup>` в выпадающих списках ролей | ✅ 2026-11 |
+| **Phase 3** | Cross-provider fallback | 🟡 частично: цепочка fallback **уже умеет** уходить на другого провайдера (проверено: OpenRouter 503 → RouterAI 200 OK), но явного `role_fallbacks` UI пока нет |
+| **Phase 4** | Цены / валюты / лимиты | 🟡 основное сделано: валюты, `by_currency`, `usd_equivalent`, ручные override'ы с привязкой к провайдеру. Осталось: авто-курс (4.6), лимиты |
+| **Phase 5** | UX админки: тест соединения, счётчики моделей, фильтры | 🟡 большая часть сделана в Phase 1–2 (выбор провайдера, фильтр по провайдеру, поиск, назначение на роль, `requires_api_key` / `pricing_mode` / `extra_headers` в форме) |
 
 ### ❌ Отклонено
 
@@ -740,8 +745,8 @@ class SkillEngine:
 
 | # | Баг | Где | План |
 |---|-----|-----|------|
-| **1** | **Валюты в `log_usage()` перепутаны** — стоимость считается как ₽ за 1M токенов, но подписывается `$`. Фактические цены RouterAI — в рублях за токен, OpenRouter — строки в USD, Ollama — бесплатно | `router.py:log_usage` | Phase 4 |
-| **2** | **Фиктивный fallback цен** `{0.50, 1.50}` для неизвестных моделей — в статистику попадают выдуманные числа | `router.py:log_usage` | Phase 4 |
-| **3** | **Цены в `config.yaml: models:` выдуманы** — например `deepseek-v4-pro: 0.5` против реальных ~131.95 ₽/1M | `config.yaml` | Phase 4 (ручной override) |
-| **4** | **Каталог моделей загрязнён** — 401 модель, из них лишь ~15% text→text. Нужен фильтр по `architecture.output_modalities` и `pricing_units.prompt == "token"` | `router.py:sync_models_from_provider` | Phase 1 |
-| **5** | **Статистика не переживает перезапуск** — in-memory агрегаты | `router.py:state.stats` | P3 |
+| **1** | **Каталог `models_cache.json` не ограничен по размеру** — описание моделей занимает ~1 МБ на 3 провайдера | `router.py:_build_v2_cache` | P3 (обрезать `description`) |
+| **2** | **Статистика не переживает перезапуск** — in-memory агрегаты | `router.py:state.stats` | P3 (переход на БД по триггерам) |
+| **3** | **`role_fallbacks` не настраивается из админки** — только вручную через `POST /config` | `admin.html` | Phase 3 |
+| **4** | **Курс валют статичный** (`usd_rate` в конфиге) — ручное обновление | `config.yaml` | Phase 4.6 |
+| **5** | **Цены из `config.yaml` — глобальные или провайдер-специфичные** — при смене провайдера override надо перепривязать | `config.yaml:models:` | Документировано в README |

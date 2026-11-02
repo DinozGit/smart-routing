@@ -11,12 +11,40 @@ SmartRouter — это легковесный прокси-сервер, кот�
 
 ## 📋 Что нового
 
+### Спринт 2026-11 (2) — Мультипровайдерность: Phase 1 + Phase 2
+
+- 🌍 **Каталог моделей по провайдерам.** `models_cache.json` переведён на формат v2:
+  `{"version": 2, "providers": {"routerai": {"models": {...}, "last_sync": ...}}}`.
+  Ключ модели теперь **составной** — `"provider::model_id"` (например `openrouter::deepseek/deepseek-v4-pro`).
+  Старый кеш v1 мигрируется автоматически при старте.
+- 🧹 **Фильтрация моделей.** В каталог попадают только text-выходящие модели с тарификацией
+  за токены. RouterAI: 582 → **351**, OpenRouter: 415 → **399**, Ollama: 12 → **10**
+  (эмбеддинги отброшены). Модели помечаются `supports_images` для роли `worker_img`.
+- 💱 **Валюты.** Цена хранится вместе с валютой (`RUB` / `USD` / `NONE`).
+  RouterAI отдаёт цены **числами в рублях**, OpenRouter — **строками в долларах** —
+  единый pricing-адаптер различает оба режима (`auto` / `per_token_rub` / `per_token_usd` / `free`).
+  В статистике: `by_currency` (в native-валюте), `total_cost` (в базовой валюте) и `usd_equivalent`.
+- 🎯 **Провайдер определяется моделью.** `provider::model` — единица маршрутизации:
+  URL, ключ и SSL-клиент берутся у провайдера **модели**, а не из глобального переключателя.
+  Роли назначаются моделями любого провайдера — **без перезапуска роутера**.
+- 🔌 **Провайдеры из коробки:** `routerai` (₽), `openrouter` ($), `ollama` (локальный, бесплатно, без API-ключа).
+  Любой OpenAI-совместимый провайдер добавляется через админку.
+- 🧹 **Удалён мёртвый код** (~317 строк): `fingerprint_system_prompt`, `fingerprint_user_messages`,
+  `AGENT_FINGERPRINTS`, `AGENT_SCOPE_PATTERNS` и 4 неиспользуемых порога — fingerprinting
+  отключён ещё в 2026-07, но код оставался ловушкой для следующего разработчика.
+- 🐛 **Исправлено 4 бага**, найденных при ручном прогоне: цена бралась у чужого провайдера
+  (ошибка до 1136×), `total_cost` суммировал рубли и доллары без пересчёта,
+  `POST /config` затирал модели соседних ролей, двойной префикс в `GET /v1/models`.
+- 🧪 **243/243 теста зелёные** (`venv\Scripts\python.exe -m pytest tests/ -q`), из них 16 регресс-тестов
+  на найденные баги (`tests/phase5/test_regressions.py`).
+
 ### Спринт 2026-11 — Transport hardening + Phase 0 (атомарная запись)
 
 - 🔌 **66204a2 — Ретраи и per-provider SSL.** Инцидент 18:20: TLS-сбой провайдера (`CERTIFICATE_VERIFY_FAILED: self-signed certificate`) ронял весь streaming-ответ, а в лог уходило безобщее `Internal Proxy Error`. Диагностика: сертификат `routerai.ru` валиден (Let's Encrypt, до 17.11.2026), 10 подряд TLS-соединений дали один fingerprint → сбой был **транзиентным на стороне провайдера**, не ошибкой конфига. Исправление: connect-таймаут 20 с (раньше висящий handshake держал слот 180 с), 3 повтора с экспоненциальной задержкой (0.7 / 1.4 / 2.8 с) на `ConnectError` / `ConnectTimeout` / `ReadTimeout` — в streaming повтор только пока клиент не получил ни одного байта, реальная причина ошибки в SSE вместо `Internal Proxy Error`, per-provider настройки `verify_ssl` / `ca_bundle` для корпоративных CA.
 - 🔐 **04d1fd8 — Атомарная запись конфигов (P0).** `routing.json` / `config.yaml` / `.env` писались напрямую — прерванная запись оставляла файл битым, и при следующем старте роутер **молча затирал настройки ролей** дефолтами. Теперь: запись через `*.tmp` + `fsync` + `os.replace()`, битый конфиг сохраняется как `*.broken` и не перезаписывается.
 - 📚 **ec52f46 — `MULTIPROVIDER_PLAN.md`**: план перехода на мультипровайдерный роутинг (RouterAI / OpenRouter / Ollama, ключи `provider::model_id`).
-- 🧪 **198/198 тестов зелёные** (`venv\Scripts\python.exe -m pytest tests/ -q`).
+- 🧪 **198/198 тестов зелёные** на момент этого спринта (`venv\Scripts\python.exe -m pytest tests/ -q`).
+  → После спринта мультипровайдерности — **243 теста**.
 
 ### Спринт 2026-07 — Code review & hotfix
 
@@ -98,11 +126,20 @@ python router.py
 
 | # | Механизм | Описание | Пример |
 |---|----------|----------|--------|
-| 1 | Явная модель | Если модель уже Flash/Qwen — не трогаем | `flash` в имени |
+| 1 | Явная модель | Если модель уже Flash/Qwen — не меняем, но **резолвим провайдера по каталогу** | `flash` в имени |
 | 2 | Тег `[AGENT:name]` | Явный префикс в user-сообщении → `agent_to_worker_mapping` | `[AGENT:database] Создай...` |
 | 3 | Default fallback | Ничего не распознано → модель роли `coordinator` | `Unknown → coordinator default` |
 
-> 📌 **Fingerprinting отключён** (commit `a711cd6`, `db9365a`). Таблица «8 уровней» из ранних ревизий больше не соответствует коду: `fingerprint_system_prompt()`, `fingerprint_user_messages()`, `AGENT_FINGERPRINTS` и `AGENT_SCOPE_PATTERNS` остались в коде, но **не вызываются** из `smart_route_model()`. Причина: Coordinator в Zed — это главный thread чата, он сам ставит задачи субагентам через `spawn_agent()` с тегом `[AGENT:name]`, и эвристика ломала бы короткие Coordinator-промпты. Деталь — в `ROADMAP.md` (шаги 1.1 / 1.2 / 2.5 отклонены).
+Результат любого шага — **составная спецификация** `"provider::model_id"`.
+Провайдер из неё определяет URL, ключ и SSL-клиент; провайдеру уходит **чистый** `model_id` без префикса.
+
+> 📌 **Fingerprinting отключён** (commit `a711cd6`, `db9365a`) — и **удалён из кода** (2026-11).
+> Таблица «8 уровней» из ранних ревизий больше не соответствует коду: `fingerprint_system_prompt()`,
+> `fingerprint_user_messages()`, `AGENT_FINGERPRINTS` и `AGENT_SCOPE_PATTERNS` удалены целиком
+> (~317 строк), вместе с тестами `tests/phase1/test_natural_lang.py`.
+> Причина: Coordinator в Zed — это главный thread чата, он сам ставит задачи субагентам через
+> `spawn_agent()` с тегом `[AGENT:name]`, и эвристика ломала бы короткие Coordinator-промпты.
+> Деталь — в `ROADMAP.md` (шаги 1.1 / 1.2 отклонены).
 
 ---
 
@@ -118,8 +155,8 @@ python router.py
 | `GET` | `/admin` | Админ-панель |
 | `GET/POST` | `/config` | Конфигурация агентов |
 | `GET/POST/DELETE` | `/providers[/{name}]` | Управление провайдерами |
-| `GET` | `/models/available[?refresh=true]` | Каталог моделей из кеша |
-| `POST` | `/models/sync` | Синхронизация каталога с провайдером |
+| `GET` | `/models/available[?refresh=true]` | Каталог моделей: сгруппирован по провайдерам + плоский список |
+| `POST` | `/models/sync` | Синхронизация каталога. Тело `{"provider": "..."}` — опционально (без него — все провайдеры) |
 
 ### Настройки транспорта (env)
 
@@ -139,28 +176,126 @@ python router.py
 
 > ⚠️ Глобально отключать проверку SSL не нужно: `verify_ssl: false` и `ca_bundle` задаются **для конкретного провайдера**, остальные продолжают работать с системным CA.
 
+---
+
+## 🌍 Провайдеры и валюты (`config.yaml`)
+
+### Провайдеры
+
+```yaml
+providers:
+  routerai:
+    display_name: RouterAI
+    base_url: https://routerai.ru/api/v1/chat/completions
+    models_endpoint: https://routerai.ru/api/v1/models
+    api_key_env: ROUTERAI_KEY
+    requires_api_key: true
+    pricing_mode: auto          # auto | per_token_rub | per_token_usd | free
+    default: true               # ← fallback для голых model_id
+    verify_ssl: true
+    ca_bundle: ""
+    extra_headers: {}
+  openrouter:
+    display_name: OpenRouter
+    base_url: https://openrouter.ai/api/v1/chat/completions
+    models_endpoint: https://openrouter.ai/api/v1/models
+    api_key_env: OPENROUTER_API_KEY
+    requires_api_key: true
+    pricing_mode: auto
+    default: false
+    extra_headers:
+      HTTP-Referer: https://github.com/smart-routing/smart-router
+      X-Title: SmartRouter
+  ollama:
+    display_name: Ollama (local)
+    base_url: http://localhost:11434/v1/chat/completions
+    models_endpoint: http://localhost:11434/api/tags
+    api_key_env: ""
+    requires_api_key: false      # ← локальный провайдер, ключ не нужен
+    pricing_mode: free
+    default: false
+```
+
+| Поле | Смысл |
+|------|-------|
+| `requires_api_key` | `false` → запрос уходит **без** `Authorization` (Ollama) |
+| `pricing_mode` | `auto` — валюта определяется по типу цены (строка → USD, число → RUB); остальные — принудительно |
+| `default` | Провайдер по умолчанию. Используется **только** как fallback для голых model_id и моделей вне каталога. Это **не** глобальный переключатель |
+| `extra_headers` | Доп. заголовки запроса (для OpenRouter — `HTTP-Referer`, `X-Title`) |
+
+Любой OpenAI-совместимый провайдер добавляется через админку (вкладка **Providers**)
+или правкой `config.yaml`. Ключ провайдера хранится в `.env` по имени `api_key_env`.
+
+### Валюты
+
+```yaml
+currency:
+  base: RUB                    # валюта, в которой считается stats["total_cost"]
+  usd_rate: 90.0               # 1 USD = 90 ₽ (ручное значение, авто-курса нет)
+  rates:
+    RUB: 1.0
+    USD: 0.011111              # = 1/90
+```
+
+- `stats["by_currency"]` — суммы **в native-валюте** каждого провайдера;
+- `stats["total_cost"]` — сумма **в базовой валюте** (пересчёт по `rates`);
+- `stats["usd_equivalent"]` — эквивалент в долларах по `usd_rate`.
+
+### Ручные override'ы цен
+
+Секция `models:` — ручное override цен (выигрывает у каталога API).
+Ключ может быть **глобальным** или **с привязкой к провайдеру**:
+
+```yaml
+models:
+  routerai::deepseek/deepseek-v4-flash:    # только для RouterAI
+    input_price: 9.157                     # ₽ за 1M токенов
+    output_price: 18.3141
+    currency: RUB
+  # openrouter::deepseek/deepseek-v4-pro:  # только для OpenRouter (пример)
+  #   input_price: 1.6                     # $ за 1M токенов
+  #   output_price: 4.8
+  #   currency: USD
+```
+
+> ⚠️ Важно: модель может существовать **у нескольких провайдеров** с разными ценами
+> и валютами (например `z-ai/glm-5.2`: 8.17 ₽ у RouterAI и 0.006 $ у OpenRouter).
+> Поэтому override'ы лучше привязывать к провайдеру.
+
 ## ⚙️ Конфигурация агентов (`routing.json`)
 
 ```json
 {
-  "agent_to_worker_mapping": {
-    "database": "deepseek/deepseek-v4-flash",
-    "tests": "deepseek/deepseek-v4-flash",
-    "bot": "deepseek/deepseek-v4-flash",
-    "devops": "deepseek/deepseek-v4-flash",
-    "api": "deepseek/deepseek-v4-flash",
-    "services": "deepseek/deepseek-v4-flash",
-    "frontend": "qwen/qwen3-coder-next",
-    "mobile": "qwen/qwen3-coder-next",
-    "design": "deepseek/deepseek-v4-flash",
-    "coordinator": "deepseek/deepseek-v4-pro"
+  "role_models": {
+    "coordinator": "routerai::minimax/minimax-m3",
+    "worker_default": "ollama::qwen3.5:9b",
+    "worker_img": "openrouter::z-ai/glm-5.2"
   },
-  "default_worker": "deepseek/deepseek-v4-flash",
+  "agent_to_worker_mapping": {
+    "database": "auto",
+    "tests": "auto",
+    "bot": "auto",
+    "devops": "auto",
+    "api": "auto",
+    "services": "auto",
+    "frontend": "auto",
+    "mobile": "auto",
+    "design": "auto"
+  },
+  "role_fallbacks": {
+    "worker_default": "routerai::deepseek/deepseek-v4-flash"
+  },
+  "default_worker": "routerai::deepseek/deepseek-v4-flash",
   "enable_auto_routing": true
 }
 ```
 
-Значение `"auto"` включает fingerprinting для агента (модель определяется динамически).
+Значение модели — **составная спецификация** `"provider::model_id"`.
+Значение `"auto"` означает: модель определяется по роли агента (динамически).
+
+> 💡 `POST /config` **мержит** словари: чтобы сменить модель только у одной роли,
+> достаточно `{"role_models": {"worker_default": "ollama::qwen3.5:9b"}}` —
+> модели других ролей сохранятся.
 
 ---
 
@@ -170,10 +305,12 @@ python router.py
 smart-routing/
 ├── router.py          # Основной сервер (FastAPI + маршрутизация)
 ├── admin.html         # SPA админ-панель (vanilla JS, без бандлера)
-├── config.yaml        # Провайдеры, роли, цены, пороги
-├── routing.json       # Agent → Model mapping (runtime-конфиг)
-├── models_cache.json  # Кеш каталога моделей (генерируется, gitignored)
+├── config.yaml        # Провайдеры, роли, валюты, override'ы цен
+├── routing.json       # Роли → модели, agent → worker mapping (runtime-конфиг)
+├── models_cache.json  # Кеш каталога моделей v2 (генерируется, gitignored)
 ├── MULTIPROVIDER_PLAN.md # План мультипровайдерной переработки
+├── docs/
+│   └── PROVIDER_CONTRACT.md # Контракт каталога/ключей/валют (источник правды)
 ├── .env               # API-ключи
 ├── requirements.txt   # Зависимости
 ├── AGENTS.md          # Конфигурация агентов CalorIt
@@ -195,8 +332,8 @@ smart-routing/
 ## 📈 Мониторинг
 
 - **Web**: `http://localhost:8765/admin` → вкладка Logs (real-time, filter by level)
-- **API**: `GET /stats` → JSON с requests, routed, costs по моделям
-- **Health**: `GET /health` → `{"status": "ok", "cost": "$0.1234"}`
+- **API**: `GET /stats` → JSON с requests, routed, costs по моделям, `by_currency`, `usd_equivalent`
+- **Health**: `GET /health` → `{"status": "ok", "cost": "0.1234", "currency": "RUB"}`
 
 ---
 

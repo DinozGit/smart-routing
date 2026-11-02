@@ -69,10 +69,11 @@ def setup_role_tuning():
 
 @pytest.fixture(autouse=True)
 def setup_model_info():
-    """Добавляет информацию о модели в кеш."""
+    """Добавляет информацию о модели в кеш (составной ключ)."""
     router.state.available_models = {
-        "deepseek/deepseek-v4-flash": MOCK_MODEL_INFO,
+        "routerai::deepseek/deepseek-v4-flash": MOCK_MODEL_INFO,
     }
+    router.state.models_by_provider = {"routerai": ["deepseek/deepseek-v4-flash"]}
 
 
 @pytest.fixture(autouse=True)

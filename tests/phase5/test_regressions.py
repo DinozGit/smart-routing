@@ -1,0 +1,441 @@
+"""
+Phase 5 — регресс-тесты на 4 бага, найденных Coordinator'ом при ручном прогоне.
+
+БАГ 1 — цена бралась у ЧУЖОГО провайдера (cross-provider price leak)
+БАГ 2 — total_cost суммировал разные валюты без пересчёта в базовую (RUB)
+БАГ 3 — POST /config затирал соседние роли (merge вместо replace)
+БАГ 4 — двойной префикс в GET /v1/models (provider::provider::model_id)
+"""
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+import router
+
+
+# ============================================================
+# БАГ 1 — цена бралась у ЧУЖОГО провайдера
+# ============================================================
+
+
+class TestBug1CrossProviderPriceLeak:
+    """
+    БАГ 1: log_usage() искал цену по голому model_id, без привязки к провайдеру.
+    Для 'openrouter::z-ai/glm-5.2' бралась запись routerai (8.1685 RUB)
+    вместо openrouter (0.006 USD) — ошибка в 1136 раз.
+
+    Исправление: шаг 3 — get_model_info(bare_id, provider) с явным указанием провайдера.
+    """
+
+    def _setup_glm_catalog(self):
+        """z-ai/glm-5.2 у двух провайдеров с разными ценами и валютами."""
+        router.state.available_models = {
+            "routerai::z-ai/glm-5.2": {
+                "id": "z-ai/glm-5.2",
+                "provider": "routerai",
+                "input_price_1m": 8.1685,
+                "output_price_1m": 16.337,
+                "currency": "RUB",
+                "price_source": "api",
+            },
+            "openrouter::z-ai/glm-5.2": {
+                "id": "z-ai/glm-5.2",
+                "provider": "openrouter",
+                "input_price_1m": 0.006,
+                "output_price_1m": 0.024,
+                "currency": "USD",
+                "price_source": "api",
+            },
+        }
+        router.state.models_by_provider = {
+            "routerai": ["z-ai/glm-5.2"],
+            "openrouter": ["z-ai/glm-5.2"],
+        }
+
+    def _reset_stats(self):
+        router.state.stats = {
+            "requests": 0,
+            "total_input": 0,
+            "total_output": 0,
+            "total_cost": 0.0,
+            "by_currency": {},
+            "usd_equivalent": 0.0,
+            "by_model": {},
+            "routed_count": 0,
+            "not_routed_count": 0,
+            "fallback_count": 0,
+            "started_at": 0,
+        }
+
+    def test_openrouter_glm_uses_openrouter_catalog(self):
+        """
+        openrouter::z-ai/glm-5.2 → цена из каталога openrouter (USD),
+        а НЕ из каталога routerai (RUB).
+
+        На старом коде: get_model_info('z-ai/glm-5.2') без провайдера →
+        искал по всем провайдерам, находил routerai (default_provider) →
+        8.1685 RUB вместо 0.006 USD.
+        """
+        self._setup_glm_catalog()
+        self._reset_stats()
+
+        router.log_usage("openrouter::z-ai/glm-5.2", 1_000_000, 500_000)
+
+        # cost = (1M*0.006 + 0.5M*0.024) / 1M = 0.006 + 0.012 = 0.018 USD
+        expected_cost_usd = 0.018
+        by_currency = router.state.stats["by_currency"]
+        assert by_currency.get("USD", 0) == pytest.approx(expected_cost_usd, rel=1e-6), (
+            f"Expected USD cost {expected_cost_usd}, got {by_currency}"
+        )
+        # total_cost в RUB: 0.018 * 0.011111 = 0.000199998
+        expected_total_rub = expected_cost_usd * 0.011111
+        assert router.state.stats["total_cost"] == pytest.approx(expected_total_rub, rel=1e-6)
+        # В by_currency НЕ ДОЛЖНО быть RUB (цена не из routerai)
+        assert "RUB" not in by_currency, (
+            f"RUB should not be in by_currency: {by_currency}"
+        )
+
+    def test_routerai_glm_uses_routerai_override(self):
+        """
+        routerai::z-ai/glm-5.2 → PRICES содержит 'routerai::z-ai/glm-5.2'
+        (manual override из config.yaml: 94.6226 / 305.2343 RUB).
+        """
+        self._setup_glm_catalog()
+        self._reset_stats()
+
+        router.log_usage("routerai::z-ai/glm-5.2", 1_000_000, 500_000)
+
+        # PRICES override: input=94.6226, output=305.2343, currency=RUB
+        # cost = (1M*94.6226 + 0.5M*305.2343) / 1M = 94.6226 + 152.61715 = 247.23975 RUB
+        expected_cost_rub = 247.23975
+        by_currency = router.state.stats["by_currency"]
+        assert by_currency.get("RUB", 0) == pytest.approx(expected_cost_rub, rel=1e-4), (
+            f"Expected RUB cost {expected_cost_rub}, got {by_currency}"
+        )
+        # total_cost в RUB (rate=1.0)
+        assert router.state.stats["total_cost"] == pytest.approx(expected_cost_rub, rel=1e-4)
+        assert "USD" not in by_currency
+
+    def test_openrouter_deepseek_pro_uses_openrouter_catalog(self):
+        """
+        openrouter::deepseek/deepseek-v4-pro → цена из каталога openrouter (USD),
+        а НЕ из PRICES (где есть только routerai::deepseek/deepseek-v4-pro).
+        """
+        router.state.available_models = {
+            "openrouter::deepseek/deepseek-v4-pro": {
+                "id": "deepseek/deepseek-v4-pro",
+                "provider": "openrouter",
+                "input_price_1m": 1.6,
+                "output_price_1m": 4.8,
+                "currency": "USD",
+                "price_source": "api",
+            },
+        }
+        router.state.models_by_provider = {
+            "openrouter": ["deepseek/deepseek-v4-pro"],
+        }
+        self._reset_stats()
+
+        router.log_usage("openrouter::deepseek/deepseek-v4-pro", 1_000_000, 500_000)
+
+        # cost = (1M*1.6 + 0.5M*4.8) / 1M = 1.6 + 2.4 = 4.0 USD
+        expected_cost_usd = 4.0
+        by_currency = router.state.stats["by_currency"]
+        assert by_currency.get("USD", 0) == pytest.approx(expected_cost_usd, rel=1e-6)
+        # total_cost = 4.0 * 0.011111 = 0.044444 RUB
+        assert router.state.stats["total_cost"] == pytest.approx(
+            expected_cost_usd * 0.011111, rel=1e-6
+        )
+        assert "RUB" not in by_currency
+
+
+# ============================================================
+# БАГ 2 — total_cost суммировал разные валюты без пересчёта
+# ============================================================
+
+
+class TestBug2TotalCostConversion:
+    """
+    БАГ 2: by_currency копился в native-валюте (правильно), а total_cost
+    складывал сырые значения рублей и долларов — сумма была бессмысленной.
+
+    Исправление: state.stats['total_cost'] += cost * rate,
+    где rate = currency.rates[currency] (RUB→1.0, USD→0.011111).
+    """
+
+    def _reset_stats(self):
+        router.state.stats = {
+            "requests": 0,
+            "total_input": 0,
+            "total_output": 0,
+            "total_cost": 0.0,
+            "by_currency": {},
+            "usd_equivalent": 0.0,
+            "by_model": {},
+            "routed_count": 0,
+            "not_routed_count": 0,
+            "fallback_count": 0,
+            "started_at": 0,
+        }
+
+    def test_usd_total_cost_converted_to_rub(self):
+        """USD-модель: total_cost += cost * 0.011111, by_currency[USD] = cost (native)."""
+        router.state.available_models = {
+            "test::usd-model": {
+                "id": "usd-model",
+                "provider": "test",
+                "input_price_1m": 2.0,
+                "output_price_1m": 4.0,
+                "currency": "USD",
+                "price_source": "api",
+            },
+        }
+        router.state.models_by_provider = {"test": ["usd-model"]}
+        self._reset_stats()
+
+        router.log_usage("test::usd-model", 1_000_000, 500_000)
+
+        # cost = (1M*2 + 0.5M*4) / 1M = 4.0 USD
+        cost = 4.0
+        assert router.state.stats["by_currency"].get("USD", 0) == pytest.approx(cost, rel=1e-6)
+        # total_cost = 4.0 * 0.011111 = 0.044444 RUB
+        assert router.state.stats["total_cost"] == pytest.approx(cost * 0.011111, rel=1e-6)
+        # usd_equivalent = cost (USD не конвертируется)
+        assert router.state.stats["usd_equivalent"] == pytest.approx(cost, rel=1e-6)
+
+    def test_rub_total_cost_no_conversion(self):
+        """RUB-модель: total_cost += cost * 1.0, by_currency[RUB] = cost (native)."""
+        router.state.available_models = {
+            "test::rub-model": {
+                "id": "rub-model",
+                "provider": "test",
+                "input_price_1m": 10.0,
+                "output_price_1m": 20.0,
+                "currency": "RUB",
+                "price_source": "api",
+            },
+        }
+        router.state.models_by_provider = {"test": ["rub-model"]}
+        self._reset_stats()
+
+        router.log_usage("test::rub-model", 1_000_000, 500_000)
+
+        # cost = (1M*10 + 0.5M*20) / 1M = 20.0 RUB
+        cost = 20.0
+        assert router.state.stats["by_currency"].get("RUB", 0) == pytest.approx(cost, rel=1e-6)
+        assert router.state.stats["total_cost"] == pytest.approx(cost, rel=1e-6)  # rate=1.0
+        # usd_equivalent = cost / 90.0
+        assert router.state.stats["usd_equivalent"] == pytest.approx(cost / 90.0, rel=1e-6)
+
+    def test_none_currency_zero_cost(self):
+        """NONE-валюта (бесплатная): всё нулевое, by_currency['NONE'] == 0."""
+        router.state.available_models = {
+            "ollama::free-model": {
+                "id": "free-model",
+                "provider": "ollama",
+                "input_price_1m": 0.0,
+                "output_price_1m": 0.0,
+                "currency": "NONE",
+                "price_source": "api",
+            },
+        }
+        router.state.models_by_provider = {"ollama": ["free-model"]}
+        self._reset_stats()
+
+        router.log_usage("ollama::free-model", 1_000_000, 500_000)
+
+        assert router.state.stats["total_cost"] == 0.0
+        assert router.state.stats["by_currency"].get("NONE", -1) == 0.0
+        assert router.state.stats["usd_equivalent"] == 0.0
+
+    def test_mixed_currencies_total_cost(self):
+        """
+        Две модели в разных валютах: total_cost суммируется корректно
+        (RUB * 1.0 + USD * 0.011111), а by_currency раздельно.
+        """
+        router.state.available_models = {
+            "test::rub-m": {
+                "id": "rub-m",
+                "provider": "test",
+                "input_price_1m": 10.0,
+                "output_price_1m": 20.0,
+                "currency": "RUB",
+                "price_source": "api",
+            },
+            "test::usd-m": {
+                "id": "usd-m",
+                "provider": "test",
+                "input_price_1m": 2.0,
+                "output_price_1m": 4.0,
+                "currency": "USD",
+                "price_source": "api",
+            },
+        }
+        router.state.models_by_provider = {"test": ["rub-m", "usd-m"]}
+        self._reset_stats()
+
+        router.log_usage("test::rub-m", 1_000_000, 500_000)  # cost_rub = 20.0
+        router.log_usage("test::usd-m", 1_000_000, 500_000)  # cost_usd = 4.0
+
+        # total_cost = 20.0 * 1.0 + 4.0 * 0.011111 = 20.044444
+        expected_total = 20.0 + 4.0 * 0.011111
+        assert router.state.stats["total_cost"] == pytest.approx(expected_total, rel=1e-6)
+        assert router.state.stats["by_currency"]["RUB"] == pytest.approx(20.0, rel=1e-6)
+        assert router.state.stats["by_currency"]["USD"] == pytest.approx(4.0, rel=1e-6)
+
+
+# ============================================================
+# БАГ 3 — POST /config затирал соседние роли
+# ============================================================
+
+
+class TestBug3ConfigMerge:
+    """
+    БАГ 3: save_config делал self.config.update(new_config) →
+    словари заменялись целиком. POST /config {'role_models': {'worker_default': 'x'}}
+    убивал coordinator и worker_img.
+
+    Исправление: _merge_config — merge на один уровень вглубь
+    (если и старое, и новое — dict → {**old, **new}, иначе новое заменяет старое).
+    """
+
+    def test_merge_config_preserves_sibling_roles(self):
+        """save_config с одной ролью → остальные роли сохранены."""
+        # isolate_config установил state.config с role_models
+        original = dict(router.state.config.get("role_models", {}))
+        assert "coordinator" in original
+        assert "worker_img" in original
+        assert "worker_default" in original
+
+        import asyncio
+        asyncio.run(
+            router.state.save_config({"role_models": {"worker_default": "ollama::x"}})
+        )
+
+        assert router.state.config["role_models"]["coordinator"] == original["coordinator"]
+        assert router.state.config["role_models"]["worker_img"] == original["worker_img"]
+        assert router.state.config["role_models"]["worker_default"] == "ollama::x"
+
+    def test_merge_config_none_value(self):
+        """save_config с None → роль становится None, остальные целы."""
+        original = dict(router.state.config.get("role_models", {}))
+
+        import asyncio
+        asyncio.run(
+            router.state.save_config({"role_models": {"coordinator": None}})
+        )
+
+        assert router.state.config["role_models"]["coordinator"] is None
+        assert router.state.config["role_models"]["worker_default"] == original["worker_default"]
+        assert router.state.config["role_models"]["worker_img"] == original["worker_img"]
+
+    def test_merge_config_scalar_replacement(self):
+        """save_config со скалярным значением → полная замена (не dict-merge)."""
+        import asyncio
+        asyncio.run(
+            router.state.save_config({"enable_auto_routing": False})
+        )
+
+        assert router.state.config["enable_auto_routing"] is False
+        # role_models не тронуты
+        assert "role_models" in router.state.config
+
+    def test_merge_config_static_method(self):
+        """_merge_config: unit-тест логики слияния."""
+        from router import RouterState
+
+        # dict + dict → вложенный merge
+        result = RouterState._merge_config(
+            {"a": {"x": 1, "y": 2}, "b": 3},
+            {"a": {"y": 99, "z": 100}},
+        )
+        assert result == {"a": {"x": 1, "y": 99, "z": 100}, "b": 3}
+
+        # scalar → replace
+        result = RouterState._merge_config({"a": 1}, {"a": 2})
+        assert result == {"a": 2}
+
+        # None → replace (даже если old — dict)
+        result = RouterState._merge_config({"a": {"x": 1}}, {"a": None})
+        assert result == {"a": None}
+
+        # новый ключ → добавить
+        result = RouterState._merge_config({"a": 1}, {"b": 2})
+        assert result == {"a": 1, "b": 2}
+
+    async def test_post_config_preserves_roles_via_http(self, client):
+        """POST /config с одной ролью → остальные роли сохранены (через HTTP)."""
+        original = dict(router.state.config.get("role_models", {}))
+
+        resp = await client.post("/config", json={
+            "role_models": {"worker_default": "ollama::y"},
+        })
+        assert resp.status_code == 200, f"POST /config failed: {resp.text}"
+
+        assert router.state.config["role_models"]["coordinator"] == original["coordinator"]
+        assert router.state.config["role_models"]["worker_img"] == original["worker_img"]
+        assert router.state.config["role_models"]["worker_default"] == "ollama::y"
+
+
+# ============================================================
+# БАГ 4 — двойной префикс в GET /v1/models
+# ============================================================
+
+
+class TestBug4DoublePrefix:
+    """
+    БАГ 4: config.yaml models: содержит ключи вида 'routerai::model'.
+    Старый код делал f'{{default_provider}}::{model_name}' →
+    'routerai::routerai::model'. Двойной префикс.
+
+    Исправление: _split_config_model_key() разделяет по первому ::,
+    и composite_id строится из provider + model_id по отдельности.
+    """
+
+    def test_split_bare_key(self):
+        """_split_config_model_key('a/b') → (None, 'a/b')."""
+        provider, model_id = router._split_config_model_key("a/b")
+        assert provider is None
+        assert model_id == "a/b"
+
+    def test_split_composite_key(self):
+        """_split_config_model_key('routerai::a/b') → ('routerai', 'a/b')."""
+        provider, model_id = router._split_config_model_key("routerai::a/b")
+        assert provider == "routerai"
+        assert model_id == "a/b"
+
+    def test_split_double_colon_in_model_id(self):
+        """_split_config_model_key('a::b::c') → ('a', 'b::c') — split по ПЕРВОМУ ::."""
+        provider, model_id = router._split_config_model_key("a::b::c")
+        assert provider == "a"
+        assert model_id == "b::c"
+
+    async def test_v1_models_no_double_prefix(self, client):
+        """GET /v1/models → ни одного ID с двумя ::."""
+        # Добавляем модель в кеш, чтобы проверить обе ветки list_models
+        router.state.available_models = {
+            "openrouter::some/test-model": {
+                "id": "some/test-model",
+                "provider": "openrouter",
+                "input_price_1m": 1.0,
+                "output_price_1m": 2.0,
+                "currency": "USD",
+                "price_source": "api",
+            },
+        }
+        router.state.models_by_provider = {"openrouter": ["some/test-model"]}
+
+        resp = await client.get("/v1/models")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["data"]) > 0, "GET /v1/models вернул пустой список"
+
+        for model in data["data"]:
+            mid = model["id"]
+            assert mid.count("::") == 1, (
+                f"ID содержит {mid.count('::')} :: (должен быть 1): {mid}"
+            )

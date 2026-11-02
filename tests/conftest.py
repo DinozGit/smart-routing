@@ -93,6 +93,8 @@ def isolate_config(tmp_path):
     router.state.models_cache_file = tmp_models
     router.state.config = dict(routing_data)
     router.state.available_models = {}
+    router.state.models_by_provider = {}
+    router.state.provider_last_sync = {}
 
     yield
 
@@ -101,6 +103,10 @@ def isolate_config(tmp_path):
     router.state.models_cache_file = orig_models_cache_file
     router.state.config = orig_config
     router.state.available_models = orig_available_models
+    # models_by_provider и provider_last_sync не восстанавливаем — 
+    # следующий тест начнёт с чистого листа
+    router.state.models_by_provider = {}
+    router.state.provider_last_sync = {}
 
 
 @pytest.fixture(scope="session")
@@ -155,3 +161,85 @@ def sample_messages(sample_coordinator_prompt) -> list:
         {"role": "system", "content": sample_coordinator_prompt},
         {"role": "user", "content": "Сделай код-ревью текущих изменений"},
     ]
+
+
+@pytest.fixture
+def v2_cache(tmp_path):
+    """
+    Создаёт models_cache.json в формате v2 и подменяет state.
+    Возвращает (tmp_path, reload_fn), где reload_fn перезагружает кеш.
+    """
+    import router
+
+    cache_file = tmp_path / "models_cache.json"
+    cache_data = {
+        "version": 2,
+        "providers": {
+            "routerai": {
+                "last_sync": 1789642911.0,
+                "models": {
+                    "deepseek/deepseek-v4-pro": {
+                        "id": "deepseek/deepseek-v4-pro",
+                        "provider": "routerai",
+                        "name": "DeepSeek V4 Pro",
+                        "context_length": 1048576,
+                        "input_price_1m": 61.9626,
+                        "output_price_1m": 123.9251,
+                        "currency": "RUB",
+                        "price_source": "api",
+                        "supports_images": False,
+                        "input_modalities": ["text"],
+                        "output_modalities": ["text"],
+                        "supported_parameters": ["temperature", "tools"],
+                        "pricing_units": {"prompt": "token", "completion": "token"},
+                    },
+                    "deepseek/deepseek-v4-flash": {
+                        "id": "deepseek/deepseek-v4-flash",
+                        "provider": "routerai",
+                        "name": "DeepSeek V4 Flash",
+                        "context_length": 65536,
+                        "input_price_1m": 5.0,
+                        "output_price_1m": 10.0,
+                        "currency": "RUB",
+                        "price_source": "api",
+                        "supports_images": False,
+                        "input_modalities": ["text"],
+                        "output_modalities": ["text"],
+                        "supported_parameters": ["temperature"],
+                        "pricing_units": {"prompt": "token", "completion": "token"},
+                    },
+                },
+            },
+            "openrouter": {
+                "last_sync": 1789642912.0,
+                "models": {
+                    "deepseek/deepseek-chat": {
+                        "id": "deepseek/deepseek-chat",
+                        "provider": "openrouter",
+                        "name": "DeepSeek Chat",
+                        "context_length": 32768,
+                        "input_price_1m": 2.5,
+                        "output_price_1m": 10.0,
+                        "currency": "USD",
+                        "price_source": "api",
+                        "supports_images": False,
+                        "input_modalities": ["text"],
+                        "output_modalities": ["text"],
+                        "supported_parameters": ["temperature"],
+                        "pricing_units": None,
+                    },
+                },
+            },
+        },
+    }
+    cache_file.write_text(
+        json.dumps(cache_data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    # Подменяем файл и перезагружаем
+    old_file = router.state.models_cache_file
+    router.state.models_cache_file = cache_file
+    router.state._load_models_cache()
+    router.state.models_cache_file = old_file
+
+    yield cache_file

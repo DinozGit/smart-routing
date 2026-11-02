@@ -241,7 +241,11 @@ class TestStreamingRetry:
 
     async def test_streaming_retry_then_success(self, client, save_providers):
         """Первый stream бросает ConnectError, второй успешен → SSE-чанки, ошибок нет."""
-        router.state.providers["routerai"] = {}
+        router.state.providers["routerai"] = {
+            "base_url": "https://routerai.ru/api/v1/chat/completions",
+            "api_key_env": "ROUTERAI_KEY",
+            "requires_api_key": True,
+        }
 
         mock_cm = MagicMock()
         mock_cm.__aenter__ = AsyncMock(
@@ -272,7 +276,11 @@ class TestStreamingRetry:
 
     async def test_streaming_no_retry_after_sent(self, client, save_providers):
         """Ошибка ПОСЛЕ отправки чанка → повтора НЕТ, stream открыт 1 раз."""
-        router.state.providers["routerai"] = {}
+        router.state.providers["routerai"] = {
+            "base_url": "https://routerai.ru/api/v1/chat/completions",
+            "api_key_env": "ROUTERAI_KEY",
+            "requires_api_key": True,
+        }
 
         mock_cm = MagicMock()
         mock_cm.__aenter__ = AsyncMock(
@@ -309,7 +317,11 @@ class TestErrorMessage:
 
     async def test_error_contains_exception_type(self, client, save_providers):
         """При неустранимой сетевой ошибке SSE содержит тип исключения, не 'Internal Proxy Error'."""
-        router.state.providers["routerai"] = {}
+        router.state.providers["routerai"] = {
+            "base_url": "https://routerai.ru/api/v1/chat/completions",
+            "api_key_env": "ROUTERAI_KEY",
+            "requires_api_key": True,
+        }
 
         mock_cm = MagicMock()
         mock_cm.__aenter__ = AsyncMock(
