@@ -17,7 +17,7 @@ import uvicorn
 import yaml
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 # ============================================================
 # 🌍 ЗАГРУЗКА .env (API-ключи)
@@ -911,6 +911,12 @@ app = FastAPI(title="SmartRouter", lifespan=lifespan)
 http_client = httpx.AsyncClient(timeout=180.0)
 
 
+@app.get("/", include_in_schema=False)
+async def root():
+    """Корень → редирект на админку (иначе 404 при заходе на порт)."""
+    return RedirectResponse(url="/admin")
+
+
 @app.get("/v1/models")
 async def list_models():
     """OpenAI-compatible model list (требуется Zed при подключении)."""
@@ -1427,8 +1433,10 @@ def _run_single_port():
         f"🚀 SmartRouter запущен на http://{ADMIN_HOST}:{ROUTER_PORT} "
         f"(single-port: router + admin)"
     )
+    # Передаём объект app, а не строку "router:app" — иначе uvicorn
+    # импортирует модуль второй раз (двойной state и дубли логов).
     uvicorn.run(
-        "router:app",
+        app,
         host=ADMIN_HOST,
         port=ROUTER_PORT,
         reload=False,
@@ -1443,7 +1451,7 @@ def _run_dual_port():
     def run_admin():
         """Runs admin server in a separate thread."""
         admin_config = uvicorn.Config(
-            app="router:app",
+            app=app,
             host=ADMIN_HOST,
             port=ADMIN_PORT,
             reload=False,
@@ -1459,7 +1467,7 @@ def _run_dual_port():
         f"admin on http://{ADMIN_HOST}:{ADMIN_PORT}"
     )
     uvicorn.run(
-        "router:app",
+        app,
         host=ADMIN_HOST,
         port=ROUTER_PORT,
         reload=False,
