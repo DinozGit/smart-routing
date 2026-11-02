@@ -1033,6 +1033,13 @@ def smart_route_model(
       - role: имя роли (coordinator / worker_default / worker_img) или ""
       - reason: человекочитаемое объяснение
     """
+    # 0. Явная составная спецификация от клиента ("provider::model") — точное указание.
+    #    Уважаем её: модель и провайдер как есть, ролевые настройки не применяются.
+    if "::" in requested_model:
+        prov = requested_model.split("::", 1)[0]
+        if prov in state.providers:
+            return requested_model, "", "Явная спецификация провайдера"
+
     # 1. Явная модель — если уже содержит flash или qwen, резолвим в составной вид
     if any(m in requested_model.lower() for m in ["flash", "qwen"]):
         spec = _normalize_to_composite(requested_model)

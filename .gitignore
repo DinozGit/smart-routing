@@ -1,5 +1,7 @@
 # Environments
 .env
+.env.*
+!.env.example
 
 # Python
 __pycache__/
@@ -8,6 +10,7 @@ __pycache__/
 dist/
 build/
 *.egg
+.pytest_cache/
 
 # Virtual env
 venv/
@@ -16,13 +19,17 @@ venv/
 # IDE
 .vscode/
 .idea/
+*.swp
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Logs
 *.log
 
-# Auto-generated cache (refreshed via POST /models/sync)
+# Local runtime state (generated, not source)
 models_cache.json
+*.broken
+*.tmp
