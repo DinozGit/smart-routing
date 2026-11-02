@@ -11,6 +11,13 @@ SmartRouter — это легковесный прокси-сервер, кот�
 
 ## 📋 Что нового
 
+### Спринт 2026-11 — Transport hardening + Phase 0 (атомарная запись)
+
+- 🔌 **66204a2 — Ретраи и per-provider SSL.** Инцидент 18:20: TLS-сбой провайдера (`CERTIFICATE_VERIFY_FAILED: self-signed certificate`) ронял весь streaming-ответ, а в лог уходило безобщее `Internal Proxy Error`. Диагностика: сертификат `routerai.ru` валиден (Let's Encrypt, до 17.11.2026), 10 подряд TLS-соединений дали один fingerprint → сбой был **транзиентным на стороне провайдера**, не ошибкой конфига. Исправление: connect-таймаут 20 с (раньше висящий handshake держал слот 180 с), 3 повтора с экспоненциальной задержкой (0.7 / 1.4 / 2.8 с) на `ConnectError` / `ConnectTimeout` / `ReadTimeout` — в streaming повтор только пока клиент не получил ни одного байта, реальная причина ошибки в SSE вместо `Internal Proxy Error`, per-provider настройки `verify_ssl` / `ca_bundle` для корпоративных CA.
+- 🔐 **04d1fd8 — Атомарная запись конфигов (P0).** `routing.json` / `config.yaml` / `.env` писались напрямую — прерванная запись оставляла файл битым, и при следующем старте роутер **молча затирал настройки ролей** дефолтами. Теперь: запись через `*.tmp` + `fsync` + `os.replace()`, битый конфиг сохраняется как `*.broken` и не перезаписывается.
+- 📚 **ec52f46 — `MULTIPROVIDER_PLAN.md`**: план перехода на мультипровайдерный роутинг (RouterAI / OpenRouter / Ollama, ключи `provider::model_id`).
+- 🧪 **198/198 тестов зелёные** (`venv\Scripts\python.exe -m pytest tests/ -q`).
+
 ### Спринт 2026-07 — Code review & hotfix
 
 - 🔧 **f8edbb0** — Исправлен критический баг запуска: `@app.on_event("shutdown")` заменён на современный `@asynccontextmanager lifespan`. Без фикса SmartRouter падал с `TypeError: Router.__init__() got an unexpected keyword argument 'on_startup'` (uvicorn ≥ 0.30 / FastAPI ≥ 0.110).
@@ -87,18 +94,15 @@ python router.py
 
 ## 🧠 Как работает умная маршрутизация
 
-### Приоритет маршрутизации (8 уровней):
+### Приоритет маршрутизации (фактически 3 шага)
 
 | # | Механизм | Описание | Пример |
 |---|----------|----------|--------|
 | 1 | Явная модель | Если модель уже Flash/Qwen — не трогаем | `flash` в имени |
-| 2 | System prompt fingerprint | Ищем "CalorIt Database", "FastAPI endpoints" в system prompt | Coordinator: 20 очков |
-| 3 | Тег `[AGENT:name]` | Явный префикс в user-сообщении | `[AGENT:database] Создай...` |
-| 4 | Coordinator heuristic | System prompt > 3000 символов → Coordinator | AGENTS.md у Coordinator |
-| 5 | User message fingerprint | Файлы, скоупы, responsibilities во всех user-messages | `database/*.py`, `CRUD operations` |
-| 6 | `spawn_agent()` pattern | Ловим вызов `spawn_agent("database", ...)` | `spawn_agent("🗄️", ...)` |
-| 7 | Code heuristics | `.tsx` → Qwen, `@router.get` → Flash | Фронтенд vs бэкенд |
-| 8 | Default fallback | Coordinator mapping или Pro | Когда ничего не сработало |
+| 2 | Тег `[AGENT:name]` | Явный префикс в user-сообщении → `agent_to_worker_mapping` | `[AGENT:database] Создай...` |
+| 3 | Default fallback | Ничего не распознано → модель роли `coordinator` | `Unknown → coordinator default` |
+
+> 📌 **Fingerprinting отключён** (commit `a711cd6`, `db9365a`). Таблица «8 уровней» из ранних ревизий больше не соответствует коду: `fingerprint_system_prompt()`, `fingerprint_user_messages()`, `AGENT_FINGERPRINTS` и `AGENT_SCOPE_PATTERNS` остались в коде, но **не вызываются** из `smart_route_model()`. Причина: Coordinator в Zed — это главный thread чата, он сам ставит задачи субагентам через `spawn_agent()` с тегом `[AGENT:name]`, и эвристика ломала бы короткие Coordinator-промпты. Деталь — в `ROADMAP.md` (шаги 1.1 / 1.2 / 2.5 отклонены).
 
 ---
 
@@ -107,12 +111,33 @@ python router.py
 | Метод | Путь | Описание |
 |-------|------|----------|
 | `POST` | `/v1/chat/completions` | Основной прокси (OpenAI-compatible) |
+| `GET` | `/v1/models` | Список моделей (OpenAI-compatible) |
 | `GET` | `/health` | Health check |
 | `GET` | `/stats` | Статистика использования |
 | `GET` | `/logs?level=INFO&limit=200` | Логи |
 | `GET` | `/admin` | Админ-панель |
 | `GET/POST` | `/config` | Конфигурация агентов |
 | `GET/POST/DELETE` | `/providers[/{name}]` | Управление провайдерами |
+| `GET` | `/models/available[?refresh=true]` | Каталог моделей из кеша |
+| `POST` | `/models/sync` | Синхронизация каталога с провайдером |
+
+### Настройки транспорта (env)
+
+| Переменная | По умолчанию | Смысл |
+|------------|--------------|-------|
+| `ROUTER_REQUEST_TIMEOUT` | `180` | Общий таймаут запроса (с) |
+| `ROUTER_CONNECT_TIMEOUT` | `20` | Таймаут установления соединения / TLS-handshake (с) |
+| `ROUTER_RETRY_ATTEMPTS` | `3` | Повторы при сетевых ошибках |
+| `ROUTER_RETRY_BACKOFF` | `0.7` | Базовая задержка ретрая (с), далее ×2 |
+
+### SSL для провайдера (вкладка Providers в админке)
+
+| Поле | Смысл |
+|------|-------|
+| `verify_ssl` | Проверять TLS-сертификат (по умолчанию `true`) |
+| `ca_bundle` | Путь к своему CA-файлу — для корпоративных шлюзов и self-signed сертификатов |
+
+> ⚠️ Глобально отключать проверку SSL не нужно: `verify_ssl: false` и `ca_bundle` задаются **для конкретного провайдера**, остальные продолжают работать с системным CA.
 
 ## ⚙️ Конфигурация агентов (`routing.json`)
 
@@ -145,8 +170,10 @@ python router.py
 smart-routing/
 ├── router.py          # Основной сервер (FastAPI + маршрутизация)
 ├── admin.html         # SPA админ-панель (vanilla JS, без бандлера)
-├── config.yaml        # Провайдеры, модели, цены, пороги
+├── config.yaml        # Провайдеры, роли, цены, пороги
 ├── routing.json       # Agent → Model mapping (runtime-конфиг)
+├── models_cache.json  # Кеш каталога моделей (генерируется, gitignored)
+├── MULTIPROVIDER_PLAN.md # План мультипровайдерной переработки
 ├── .env               # API-ключи
 ├── requirements.txt   # Зависимости
 ├── AGENTS.md          # Конфигурация агентов CalorIt
@@ -173,15 +200,15 @@ smart-routing/
 
 ---
 
-# 🔬 Code Review — 2026-06-29 (Обновлённый)
+# 🔬 Code Review — 2026-06-29, пересмотрен 2026-11
 
 ## ✅ Сильные стороны
 
 | Аспект | Оценка | Комментарий |
 |--------|--------|------------|
 | Архитектура | ⭐⭐⭐⭐⭐ | Однофайловый прокси, 5 зависимостей, минимум сложности |
-| Приоритет маршрутизации | ⭐⭐⭐⭐⭐ | 8-уровневый каскад с fingerprinting + эвристиками |
-| Fingerprinting | ⭐⭐⭐⭐ | 10 агентов, компилированные regex, хорошие веса |
+| Приоритет маршрутизации | ⭐⭐⭐⭐⭐ | 3 шага: явная модель → `[AGENT:name]` → coordinator default |
+| Fingerprinting | ⭐⭐⭐ | Код оставлен, но **не вызывается** — шаги 1.1/1.2/2.5 отклонены (см. ниже) |
 | Streaming (SSE) | ⭐⭐⭐⭐ | Корректная обработка chunk'ов, извлечение usage |
 | Admin panel | ⭐⭐⭐⭐ | SPA без бандлера, логи + агенты + провайдеры, работает |
 | Кольцевой буфер логов | ⭐⭐⭐⭐⭐ | In-memory, 500 записей, через logging.Handler |
@@ -192,32 +219,32 @@ smart-routing/
 
 ### 🔴 P0 — Критические
 
-| # | Проблема | Где | Суть |
-|---|----------|-----|------|
-| **1** | **Sub-agents не маршрутизируются — всегда идут через Pro** | `router.py:480-598` | System prompt sub-agent'а — generic (Zed `SystemPromptTemplate`), не содержит "CalorIt Database" и т.д. `[AGENT:name]` префикс полагается на Coordinator (LLM нестабилен). `fingerprint_user_messages()` паттерны слишком узкие (ищут "database/\*.py" и "SQLAlchemy models", а задача от Coordinator'а — просто "создай миграцию") |
-| **2** | **Coordinator имеет жёсткую привязку — не гибко** | `router.py:594-597` | Неизвестные запросы всегда fallback'ятся к `coordinator` в mapping → к Pro. Coordinator нельзя просто сменить на другую модель через админку без изменения fallback-логики |
-| **3** | **Admin port из config.yaml не используется** | `router.py:889` + `config.yaml:46-48` | В config.yaml указаны отдельные порты (8765/8766), но uvicorn стартует жёстко на 8765. Всё на одном порту. |
+| # | Проблема | Где | Статус |
+|---|----------|-----|--------|
+| ~~**1**~~ | ~~Sub-agents не маршрутизируются — всегда идут через Pro~~ | `router.py` | ✅ **Решено** — связка `spawn_agent()` + тег `[AGENT:name]` в `AGENTS.md` работает: Coordinator ставит задачу агенту, агент уходит на свою модель. Fingerprinting не нужен и был отключён (`a711cd6`, `db9365a`) |
+| ~~**2**~~ | ~~Coordinator имеет жёсткую привязку~~ | `router.py` | ✅ **Решено** — модель Coordinator задаётся в `routing.json:role_models.coordinator` и меняется из админки **на лету, без перезапуска** (commit `b8b0a63` и ранее) |
+| ~~**3**~~ | ~~Admin port из config.yaml не используется~~ | `config.yaml` | ⚠️ **Осознанно** — `single_port: true`, API + админка на одном порту `8765`. Разделение портов — в бэклоге P2 |
 
 ### 🟠 P1 — Высокие
 
-| # | Проблема | Где | Суть |
-|---|----------|-----|------|
-| **4** | **Модели в админке захардкожены** | `admin.html:863-868` | `availableModels = ["auto", "deepseek/...", "qwen/..."]` — не подгружаются из config.yaml или API провайдера |
-| **5** | **Нет автосписка моделей из провайдеров** | `config.yaml:39` | `models_endpoint` задан, но не используется для `GET /models` |
-| **6** | **Prices не обновляются динамически** | `router.py:68-76` | PRICES загружается при старте из config.yaml, админка не позволяет менять цены |
-| **7** | **Нет fallback-провайдера** | `router.py:114-126` | Если RouterAI упал — нет автоматического переключения на OpenRouter |
-| **8** | **Нет тестов** | — | Полное отсутствие pytest. Невозможно гарантировать, что fingerprinting работает после изменений |
+| # | Проблема | Где | Статус |
+|---|----------|-----|--------|
+| ~~**4**~~ | ~~Модели в админке захардкожены~~ | `admin.html` | ✅ **Решено** — вкладка Models, подгрузка из `/v1/models` |
+| ~~**5**~~ | ~~Нет автосписка моделей из провайдеров~~ | `router.py` | ✅ **Решено** — `models_cache.json` + `POST /models/sync` + `GET /models/available` |
+| **6** | Prices не обновляются динамически + **несогласованность валют** | `router.py:log_usage` | 🐛 **Открыто (Phase 4)** — см. «Известные баги» ниже |
+| **7** | Нет fallback-провайдера | `router.py` | ⏳ **В работе (Phase 3)** — cross-provider fallback по плану `MULTIPROVIDER_PLAN.md` |
+| ~~**8**~~ | ~~Нет тестов~~ | `tests/` | ✅ **Решено** — 198 тестов, `venv\Scripts\python.exe -m pytest tests/ -q` |
+| **9** | Сбой сети роняет запрос без ретрая | `router.py:proxy` | ✅ **Решено в 2026-11** (`66204a2`) — 3 ретрая с backoff, connect-таймаут 20 с, честный текст ошибки в SSE |
 
 ### 🟡 P2 — Средние
 
 | # | Проблема | Где | Суть |
 |---|----------|-----|------|
-| **9** | **Models endpoint не реализован** | `router.py` | Zed требует `GET /v1/models` для списка моделей — SmartRouter не отдаёт |
-| **10** | **Нет rate limiting** | — | Нет защиты от перерасхода токенов |
-| **11** | **Logger не структурированный** | `router.py:31-36` | Обычный text logger, нет JSON-формата для парсинга |
-| **12** | **Нет CORS middleware** | `router.py:604` | Админка работает т.к. на том же origin, но для внешнего доступа нужен |
-| **13** | **Нет Docker** | — | Нет Dockerfile для быстрого деплоя |
-| **14** | **Config.yaml и routing.json — два источника правды** | — | Модели есть и в config.yaml (с ценами) и в routing.json (mapping). Частичное дублирование. |
+| **10** | **Нет rate limiting** | — | ⏳ Спринт 3 — защита от перерасхода токенов |
+| **11** | **Logger не структурированный** | `router.py:31-36` | ⏳ Спринт 3 — JSON-логи + Request ID |
+| **12** | **Нет CORS middleware** | `router.py` | ⏳ Спринт 3 (нужно только для внешнего доступа к админке) |
+| **13** | **Нет Docker** | — | ⏳ Не в приоритете — проект живёт локально |
+| **14** | **Config.yaml и routing.json — два источника правды** | — | ⚠️ Частично: `config.yaml` — провайдеры/роли/цены (человеческий ввод, git), `routing.json` — runtime (модели ролей, tuning). Разведение зафиксировано в `MULTIPROVIDER_PLAN.md` |
 
 ### 🟢 P3 — Низкие
 
@@ -231,123 +258,108 @@ smart-routing/
 
 ---
 
-# 🔴 КРИТИЧЕСКАЯ ПРОБЛЕМА: Почему sub-agents не маршрутизируются
+# ✅ РЕШЕНО: как sub-agents маршрутизируются
 
-## Подтверждённая диагностика
+> **Статус: решено.** Раздел сохранён как история ревью 2026-06-29.
 
-Из логов видно: **все** запросы идут через `deepseek/deepseek-v4-pro`:
+Изначально проблема выглядела так: все запросы шли через `deepseek/deepseek-v4-pro`, ни одного `🔄 Маршрутизация: ... -> deepseek/deepseek-v4-flash`:
 
 ```
 💰 deepseek/deepseek-v4-pro: In 270452 | Out 135 | Cost $0.135429
 💰 deepseek/deepseek-v4-pro: In 270798 | Out 544 | Cost $0.136215
 ```
 
-Ни одной маршрутизации на Flash или Qwen. Ни одного `🔄 Маршрутизация: ... -> deepseek/deepseek-v4-flash`.
-
-## Корень проблемы (3 причины)
+Диагноз тогда свёлся к трём причинам (все они сняты):
 
 ### Причина A: System prompt sub-agent'а — generic
 
-Zed при создании sub-agent'а генерирует **новый** system prompt через `SystemPromptTemplate`:
-- Нет "CalorIt API Layer"
-- Нет "database/*.py"  
-- Нет "SQLAlchemy models"
-- Просто: "You are the Zed coding agent... project context... date..."
+Zed при создании sub-agent'а генерирует **новый** system prompt через `SystemPromptTemplate` — без маркеров роли.
 
-→ `fingerprint_system_prompt()` возвращает `None`
+→ Решение: **fingerprinting отключён** (`a711cd6`). Роль определяется не по тексту промпта, а по явному тегу.
 
 ### Причина B: `[AGENT:name]` префикс — зависит от Coordinator (LLM)
 
-AGENTS.md инструктирует Coordinator добавлять `[AGENT:database]` в начало сообщения. Но:
-- LLM не всегда следуют инструкциям на 100%
-- Если Coordinator пропустит префикс — sub-agent не будет распознан
-- Нет fallback на уровне роутера
+AGENTS.md инструктирует Coordinator добавлять `[AGENT:database]` в начало сообщения. LLM не всегда следует инструкциям на 100%.
+
+→ Решение: **AGENTS.md теперь содержит жёсткое правило** — «При вызове `spawn_agent()` КАЖДОЕ сообщение sub-agent'у ДОЛЖНО начинаться с `[AGENT:agent_name]`», а сам SmartRouter использует этот тег для выбора дешёвой модели. Отдельный fallback-heuristic не потребовался.
 
 ### Причина C: `fingerprint_user_messages()` — слишком узкие паттерны
 
-Паттерны ищут технические термины: `"database/*.py"` (weight 12), `"alembic/versions?/*.py"` (weight 10).
+Паттерны искали технические термины (`database/*.py`, `alembic/versions/*.py`), а Coordinator даёт задачу естественным языком.
 
-Но Coordinator даёт задачу естественным языком: *"Создай миграцию для таблицы users"* — в этом сообщении **нет** `"database/*.py"`.
+→ Решение: функция оставлена в коде, но **не вызывается** (`smart_route_model()` содержит только 3 шага). Это осознанное решение, а не забытый код — см. `ROADMAP.md` (шаги 1.1 / 1.2 / 2.5 отклонены).
 
-Паттерны рассчитаны на то, что контекст спавна (write scope, files) будет в сообщении, но Zed этого не добавляет.
-
-## ❗ Конкретный trace одного sub-agent запроса
+### Как работает сейчас
 
 ```
-1. Coordinator spawn_agent("🗄️ CalorIt Database", "Создай таблицу users")
-2. Zed создаёт sub-agent thread:
-   System prompt: "You are the Zed coding agent... [generic]"
-   User message: "Создай таблицу users"   ← может быть с [AGENT:database], может нет
-3. SmartRouter получает запрос с model="deepseek/deepseek-v4-pro"
-4. Step 2 (system prompt): generic → None
-5. Step 3 (agent tag): если НЕТ [AGENT:database] → None
-6. Step 4 (coordinator heuristic): system prompt < 3000 chars → не Coordinator
-7. Step 5 (user msg fingerprint): "Создай таблицу users" — НЕТ паттернов → None
-8. Step 6 (spawn_agent pattern): в user-сообщении НЕТ "spawn_agent(" → None
-9. Step 7 (heuristics): "Создай таблицу users" — нет .tsx, @router, pytest → None
-10. Step 8 (fallback): coordinator mapping → deepseek/deepseek-v4-pro ❌
+1. Coordinator вызывает spawn_agent("🗄️ CalorIt Database", "[AGENT:database] Создай таблицу users")
+2. Zed создаёт sub-agent thread с этим user-сообщением
+3. SmartRouter: smart_route_model() видит тег [AGENT:database]
+4. → agent_to_worker_mapping["database"] → роль worker_default → её модель
+5. Модель Coordinator в это время не тратится
 ```
+
+> ⚠️ Всё ещё стоит следить за тем, чтобы Coordinator **не забывал** префикс `[AGENT:name]`: без него запрос корректно уйдёт в Coordinator (fallback по умолчанию), а не к Worker.
 
 ---
 
 # 🔧 План развития v1.5 → v2.0
 
+> Актуальные приоритеты — в `ROADMAP.md` и `MULTIPROVIDER_PLAN.md`. Блок ниже — исторический срез на 2026-07, актуализирован по состоянию на 2026-11.
+
 ```
-Week 1 ──────────────────────────────────────────────────────────
-🔴 P0  ├── Дехардкод Coordinator fallback (гибкая смена через админку)
-🟠 P1  ├── GET /v1/models (требуется Zed)
-🟠 P1  ├── Автосписок моделей из RouterAI + OpenRouter
-       └── Тесты на fingerprinting (pytest) [уже 172/172 ✅]
-       (sub-agent fallback — см. «Отклонено» ниже)
+Спринт 2026-11 ───────────────────────────────────────────────────
+🔴 P0  ├── ✅ Атомарная запись конфигов (04d1fd8)
+       └── ✅ Transport hardening: ретраи + SSL + таймауты (66204a2)
 
-Week 2 ──────────────────────────────────────────────────────────
-🟠 P1  ├── Динамические цены моделей через админку
-🟠 P1  ├── Разделение портов (8765 router + 8766 admin)
-🟠 P1  ├── Fallback-провайдер (RouterAI → OpenRouter при ошибке)
+Спринт 2026-11 (продолжение) ─────────────────────────────────────
+🟠 P1  ├── Phase 1 — каталог моделей по провайдерам + фильтрация
+🟠 P1  ├── Phase 2 — resolve_model_spec, ключи provider::model_id
+🟠 P1  ├── Phase 3 — cross-provider fallback (Спринт 2)
+🟠 P1  └── Phase 4 — цены/валюты/лимиты (Спринт 2)
+
+Спринт 2026-11 (Спринт 3) ────────────────────────────────────────
+🟡 P2  ├── Phase 5 — UX админки: тест соединения, счётчики, фильтры
 🟡 P2  ├── Rate limiting
-       └── Структурированные JSON-логи
+🟡 P2  └── Структурированные JSON-логи + Request ID
 
-Week 3-4 ────────────────────────────────────────────────────────
-🟡 P2  ├── CORS middleware
-🟡 P2  ├── Request ID (X-Request-ID)
-🟡 P2  ├── Dockerfile + docker-compose
-🟢 P3  ├── Сохранение stats на диск
-       └── Graceful shutdown с flush stats
-
-Month 2+ ────────────────────────────────────────────────────────
+Месяц 2+ ────────────────────────────────────────────────────────
+🟢 P3  ├── БД (SQLite) — только при появлении истории затрат / >10K моделей
 🟢 P3  ├── Smart Router v2 — Agent Framework
 🟢 P3  ├── Skill Prompting Engine (YAML-driven)
-🟢 P3  ├── SQLite storage (persistent config/stats/skills)
-🟢 P3  ├── Интеграция VS Code / JetBrains
-       └── CLI (`sr chat "..."`)
+🟢 P3  └── Интеграция VS Code / JetBrains, CLI (`sr chat "..."`)
 ```
 
 ## Состояние (чек-лист)
 
 - [x] Переименование в SmartRouter
-- [x] System prompt fingerprinting (Coordinator detection)
-- [x] `[AGENT:name]` префикс в AGENTS.md
-- [x] User message fingerprinting
-- [x] Админ-панель: логи + агенты + провайдеры
+- [x] `[AGENT:name]` префикс в AGENTS.md — **единственный рабочий канал** маршрутизации sub-agent'ов
+- [x] Админ-панель: логи + агенты + провайдеры + модели
 - [x] Сохранение провайдеров + API-ключей из админки
 - [x] config.yaml + routing.json
-- [x] **🟢 P3 #16: lifespan вместо `@app.on_event` (f8edbb0)** ✅
-- [ ] **🔴 P0: Дехардкод Coordinator fallback**
-- [ ] `GET /v1/models`
-- [ ] Автосписок моделей провайдеров
-- [ ] Динамические цены в админке
+- [x] **🟢 P3 #16: lifespan вместо `@app.on_event` (f8edbb0)**
+- [x] **🔴 P0: Дехардкод Coordinator fallback** — смена моделей на лету, без перезапуска
+- [x] **`GET /v1/models`**
+- [x] **Автосписок моделей провайдера** (`models_cache.json` + `/models/sync`)
+- [x] **Fine tuning ролей через админку** (параметры + system prompt prefix)
+- [x] **🧪 198 тестов** (`pytest tests/ -q`)
+- [x] **🔴 P0: атомарная запись конфигов** (2026-11, `04d1fd8`)
+- [x] **🟠 P1: transport hardening** — ретраи, connect-таймаут, per-provider SSL (2026-11, `66204a2`)
+- [ ] **🟠 P1: Phase 1 — каталог моделей по провайдерам** (следующий)
+- [ ] **🟠 P1: Phase 2 — провайдер определяется по модели**
+- [ ] Динамические цены в админке + корректные валюты (Phase 4)
+- [ ] Provider failover (cross-provider, Phase 3)
+- [ ] Rate limiting
+- [ ] JSON-логи + Request ID
 - [ ] Разделение портов router/admin (сейчас single_port=true → 8765)
-- [ ] Provider failover
-- [ ] Rate limiting (P1)
-- [ ] JSON-логи (P1)
-- [ ] Docker (P2)
-- [ ] CORS middleware (P2)
-- [ ] Persistent stats (P2)
+- [ ] Persistent stats
 - [ ] Smart Router v2 (Agent Framework + Skills)
 
 ### ❌ Отклонено
 
 - ~~**Шаг 2.5 — sub-agent fallback heuristic**~~ (см. раздел «📋 Что нового»). Coordinator в Zed — главный thread чата, а не роль роутера. Связка `[AGENT:name]` → `agent_to_worker_mapping` остаётся единственным каналом маршрутизации sub-agent'ов.
+- ~~**Переход на БД (SQLite/Postgres) на текущем этапе**~~ — JSON остаётся: конфиг должен быть ручным и версионируемым в git, кеш регенерируем, статистика — in-memory агрегаты. Триггеры для перехода: история затрат по дням, >1 параллельного писателя, аудит-трейл конфига, >10K моделей.
+- ~~**Глобальное отключение проверки SSL**~~ — вместо этого per-provider `verify_ssl` / `ca_bundle`.
 
 ---
 
@@ -465,9 +477,9 @@ API для получения списка моделей:
 
 ## 1.7 GET /v1/models (совместимость с Zed)
 
-> **Статус:** ❌ Не реализовано
+> **Статус:** ✅ Реализовано (`router.py`, endpoint `GET /v1/models`)
 
-Zed при старте делает `GET /v1/models` для получения списка доступных моделей. SmartRouter должен отдавать:
+Zed при старте делает `GET /v1/models` для получения списка доступных моделей. SmartRouter отдаёт:
 ```json
 {
   "object": "list",
@@ -479,24 +491,44 @@ Zed при старте делает `GET /v1/models` для получения 
 }
 ```
 
-Без этого эндпоинта Zed может показывать ошибки при подключении (хотя чат работает).
+> 📌 **Дальше (Phase 2 плана):** ID моделей станут составными — `provider::model_id` (например `openrouter::deepseek/deepseek-v4-flash`), чтобы провайдер определялся по самой модели, а не глобальным переключателем.
+
+---
+
+## 🐛 Известные баги (не исправлены)
+
+| # | Баг | Где | Планируется |
+|---|-----|-----|-------------|
+| **1** | **Валюты в `log_usage()` перепутаны** — стоимость считается как ₽ за 1M токенов, но подписывается символом `$`. Фактические цены RouterAI — в рублях за токен, OpenRouter — строки в USD, Ollama — бесплатно | `router.py:log_usage` | Phase 4 |
+| **2** | **Фиктивный fallback цен** `{0.50, 1.50}` для неизвестных моделей — в статистику попадают выдуманные числа | `router.py:log_usage` | Phase 4 |
+| **3** | **Цены в `config.yaml: models:` выдуманы** — например `deepseek-v4-pro: 0.5` против реальных ~131.95 ₽/1M | `config.yaml` | Phase 4 (ручной override) |
+| **4** | **Каталог моделей загрязнён** — 401 модель, из них лишь ~15% text→text. Нужен фильтр по `architecture.output_modalities` и `pricing_units.prompt == "token"` | `router.py:sync_models_from_provider` | Phase 1 |
+| **5** | **Статистика не переживает перезапуск** — in-memory агрегаты | `router.py:state.stats` | P3 |
+
+> 💡 **Про БД.** Переход на SQLite/Postgres на текущем этапе **не нужен**: конфиг должен оставаться ручным и версионируемым в git, кеш моделей регенерируем, статистика — in-memory агрегаты. БД станет актуальна, когда появится: история затрат по дням, больше одного параллельного писателя, аудит-трейл конфига или больше 10K моделей. Зафиксировано как P3 с триггерами в `ROADMAP.md`.
 
 ---
 
 ## 🛣️ Roadmap
 
-Полный план развития вынесен в отдельный файл: **[ROADMAP.md](ROADMAP.md)**
+Полный план развития вынесен в отдельный файл: **[ROADMAP.md](ROADMAP.md)**, архитектурный план мультипровайдерности — в **[MULTIPROVIDER_PLAN.md](MULTIPROVIDER_PLAN.md)**.
 
 ### Краткий срез приоритетов:
 
 | Приоритет | Что | Статус |
 |-----------|-----|--------|
-| 🔴 P0 | Sub-agent fallback + fingerprint (естеств. язык) | ⏳ В плане |
-| 🔴 P0 | Рефакторинг на 3 роли (Coordinator / Worker / Worker Img) | ⏳ В плане |
-| 🔴 P0 | Fallback chain между ролями | ⏳ В плане |
-| 🟠 P1 | Fine tuning ролей через админку | ⏳ В плане |
-| 🟠 P1 | Provider failover (RouterAI → OpenRouter) | ⏳ В плане |
-| 🟡 P2 | Тесты, Docker, JSON-логи | ⏳ В плане |
+| 🔴 P0 | Рефакторинг на 3 роли (Coordinator / Worker / Worker Img) | ✅ Сделано |
+| 🔴 P0 | Fallback chain между ролями | ✅ Сделано |
+| 🔴 P0 | Дехардкод Coordinator fallback (смена моделей без перезапуска) | ✅ Сделано |
+| 🔴 P0 | Атомарная запись конфигов | ✅ Сделано (2026-11) |
+| 🟠 P1 | Fine tuning ролей через админку | ✅ Сделано |
+| 🟠 P1 | Transport hardening (ретраи, connect-таймаут, per-provider SSL) | ✅ Сделано (2026-11) |
+| 🟠 P1 | Phase 1 — каталог моделей по провайдерам | ⏳ Следующий |
+| 🟠 P1 | Phase 2 — провайдер определяется по модели (`provider::model_id`) | ⏳ Далее |
+| 🟠 P1 | Phase 4 — цены, валюты, лимиты | ⏳ Спринт 2 |
+| 🟡 P2 | Provider failover (cross-provider) | ⏳ Спринт 2 |
+| 🟡 P2 | Rate limiting, JSON-логи, Request ID | ⏳ Спринт 3 |
+| 🟢 P3 | Переход на БД (только при появлении истории затрат / >10K моделей) | ⏳ По триггерам |
 | 🟢 P3 | Smart Router v2 — Agent Framework + Skills | ⏳ В плане |
 
 ---

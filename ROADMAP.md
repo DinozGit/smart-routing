@@ -146,24 +146,50 @@ Heuristic "короткий system prompt → default_worker" **отклонён
 
 **Причина отклонения:** Fingerprinting естественного языка не нужен при рабочей схеме `[AGENT:name]` — Coordinator в Zed **всегда** отправляет тег (правило зафиксировано в `AGENTS.md`). Маршрутизация по тегу работает стабильно и однозначна; эвристика по user messages добавляет ложные срабатывания и неопределённость.
 
-### 1.3 GET /v1/models
+### 1.3 GET /v1/models ✅ СДЕЛАНО
 
-Обязательный эндпоинт для Zed.
+Обязательный эндпоинт для Zed. Реализован в `router.py` (`GET /v1/models`), возвращает модели из `config.yaml` + кеша провайдера.
 
-### 1.4 Дехардкод Coordinator fallback
+> 📌 Дальше (Phase 2): ID станут составными — `provider::model_id`.
+
+### 1.4 Дехардкод Coordinator fallback ✅ СДЕЛАНО
 
 **Что было:** неизвестные запросы → `mapping["coordinator"]` → GLM/Pro (дорого).
 Также size-based fallback: `len(system_prompt) > 3000 → coordinator`.
 
-**Что стало:** неизвестные запросы → `default_worker` → Flash (дёшево).
-Coordinator определяется **только** через fingerprinting (system prompt или user messages).
-Size-based fallback (шаг 4) полностью удалён.
+**Что стало:** Coordinator-модель вынесена в `routing.json:role_models.coordinator` и меняется из админки **на лету, без перезапуска роутера**. Размер system prompt больше не влияет на маршрутизацию; fingerprinting отключён (`a711cd6`, `db9365a`).
 
-**Эффект:** неизвестные запросы и длинные generic промпты больше не улетают на дорогую модель.
+**Эффект:** неизвестные запросы и длинные generic промпты больше не улетают на дорогую модель, а модель Coordinator можно менять без рестарта.
 
 **Тесты:** `tests/phase1/test_dehardcode.py` — 8 тестов.
 
-**Коммит:** `1cfa15b`
+**Коммиты:** `1cfa15b`, `a711cd6`, `db9365a`
+
+### 1.5 Атомарная запись конфигов ✅ СДЕЛАНО (2026-11)
+
+**Что было:** `routing.json` / `config.yaml` / `.env` писались напрямую через `write_text`. Прерванная запись оставляла файл битым, и при следующем старте `_load_config()` молча вызывал `_init_default_config()` — **настройки ролей терялись безвозвратно**.
+
+**Что стало:**
+- `_atomic_write()` — запись в `*.tmp` + `flush` + `fsync` + `os.replace()` (атомарно на Windows/Linux)
+- битый `routing.json` / `models_cache.json` сохраняется как `*.broken` и **не перезаписывается** дефолтами
+
+**Тесты:** `tests/phase4/test_atomic_config.py` — 13 тестов.
+
+**Коммит:** `04d1fd8`
+
+### 1.6 Transport hardening ✅ СДЕЛАНО (2026-11)
+
+**Что было:** сетевой сбой (например `CERTIFICATE_VERIFY_FAILED` от провайдера) ронял весь streaming-ответ, в лог уходило безобщее `Internal Proxy Error`, connect-таймаут отсутствовал (висящий TLS handshake держал слот 180 с).
+
+**Что стало:**
+- connect-таймаут 20 с + общий таймаут 180 с (настраиваются env)
+- 3 ретрая с экспоненциальной задержкой на `ConnectError` / `ConnectTimeout` / `ReadTimeout`; в streaming — только пока клиент не получил ни одного байта
+- реальная причина ошибки в SSE вместо `Internal Proxy Error`
+- per-provider `verify_ssl` / `ca_bundle` — свой CA для корпоративных шлюзов
+
+**Тесты:** `tests/phase4/test_transport_retry.py` — 13 тестов.
+
+**Коммит:** `66204a2`
 
 ---
 
@@ -390,11 +416,13 @@ tests/
 │   ├── test_provider_failover.py # RouterAI → OpenRouter при ошибке
 │   └── test_blacklist.py       # API-blacklist
 │
-└── phase4/
-    ├── test_docker.py          # Dockerfile сборка + запуск
-    ├── test_logging.py         # JSON-логи, Request ID
-    ├── test_structured_logs.py # Структурированные логи
-    └── test_perf.py            # Производительность (latency, rps)
+├── phase4/
+│   ├── test_transport_retry.py  # Ретраи, backoff, per-provider SSL, таймауты
+│   ├── test_atomic_config.py    # Атомарная запись конфигов, backup битых файлов
+│   ├── test_docker.py          # Dockerfile сборка + запуск
+│   ├── test_logging.py         # JSON-логи, Request ID
+│   ├── test_structured_logs.py # Структурированные логи
+│   └── test_perf.py            # Производительность (latency, rps)
 ```
 
 ### Что тестировать в каждой фазе
@@ -456,7 +484,33 @@ pytest tests/ -v -k "phase0 or phase1 or phase2"
 pytest tests/ -v
 ```
 
-#### Phase 4 — Docker + Production
+#### Phase 4 — Transport hardening + атомарная запись (2026-11) ✅
+
+| Тест | Что проверяет | Критерий успеха |
+|------|-------------|----------------|
+| `test_transport_retry.py` | Ретраи на `ConnectError` / `ConnectTimeout` / `ReadTimeout`, экспоненциальный backoff, отсутствие ретрая после отправки байтов, per-provider SSL-клиент и его кэш, честный текст ошибки в SSE | 13 тестов, без сети |
+| `test_atomic_config.py` | Атомарная запись (нет `.tmp` в остатке), перезапись целиком, backup битого `routing.json` как `*.broken`, конфиг НЕ затирается дефолтами | 13 тестов |
+
+```bash
+# После Phase 4:
+pytest tests/phase4/ -v
+```
+
+#### Phase 5 — Мультипровайдерность (в работе)
+
+| Тест | Что проверяет | Критерий успеха |
+|------|-------------|----------------|
+| `test_provider_catalog.py` | Каталог моделей по провайдерам, фильтрация text→text, миграция формата кеша | — |
+| `test_resolve_model_spec.py` | `provider::model_id` → `(provider, model_id)`, bare-ID → каталог → `default_provider` | — |
+| `test_provider_proxy.py` | Проксирование к правильному провайдеру, ключ из модели, `body["model"]` без префикса | — |
+| `test_currency_pricing.py` | Цены и валюты: ₽ из RouterAI, USD из OpenRouter, free для Ollama | — |
+
+```bash
+# После Phase 5:
+pytest tests/phase5/ -v
+```
+
+#### Phase 6 — Docker + Production
 
 | Тест | Что проверяет | Критерий успеха |
 |------|-------------|----------------|
@@ -563,25 +617,34 @@ class SkillEngine:
 ```
 Сейчас ──────────────────────────────────────────────────────
 🔴 P0  ├── ✅ GET /v1/models (готов)
-🔴 P0  ├── 🆕 Реальные цены моделей в config.yaml (была дефолтная заглушка)
-🔴 P0  ├── 🆕 Hot-reload server.* параметров (single_port)
-       └── Создание структуры 3 ролей в конфиге
+🔴 P0  ├── ✅ Реальные цены моделей в config.yaml (была дефолтная заглушка)
+🔴 P0  ├── ✅ Hot-reload server.* параметров (single_port)
+🔴 P0  ├── ✅ Атомарная запись конфигов (2026-11)
+🔴 P0  └── ✅ Transport hardening: ретраи + таймауты + per-provider SSL (2026-11)
 
-Неделя 1-2 ─────────────────────────────────────────────────
-🟠 P1  ├── Три роли: Coordinator / Worker / Worker Img
-🟠 P1  ├── Fallback chain
-🟠 P1  ├── Разделение портов
-🟠 P1  ├── Fine tuning в админке (параметры + промпты)
-🟠 P1  ├── Динамические цены моделей
-🟠 P1  └── Structured Logging (JSON-логи + Request ID)
+Спринт 2026-11 ───────────────────────────────────────────────
+🟠 P1  ├── Phase 1 — каталог моделей по провайдерам (+ фильтрация)
+🟠 P1  ├── Phase 2 — resolve_model_spec: provider::model_id
+🟠 P1  ├── Phase 3 — cross-provider fallback (Спринт 2)
+🟠 P1  ├── Phase 4 — цены / валюты / лимиты (Спринт 2)
+🟠 P1  └── Phase 5 — UX админки (Спринт 3)
+
+Неделя 1-2 (исторический план) ─────────────────────────────
+🟠 P1  ├── Три роли: Coordinator / Worker / Worker Img          ✅
+🟠 P1  ├── Fallback chain                                        ✅
+🟠 P1  ├── Разделение портов                                     ✅
+🟠 P1  ├── Fine tuning в админке (параметры + промпты)           ✅
+🟠 P1  ├── Динамические цены моделей                             ⏳ Phase 4
+🟠 P1  └── Structured Logging (JSON-логи + Request ID)          ⏳ Спринт 3
 
 Неделя 3-4 ─────────────────────────────────────────────────
-🟡 P2  ├── Provider failover (RouterAI → OpenRouter)
-🟡 P2  ├── Rate limiting
-🟡 P2  ├── Тесты (pytest)
-🟡 P2  └── Docker
+🟡 P2  ├── Provider failover (RouterAI → OpenRouter)            ⏳ Phase 3
+🟡 P2  ├── Rate limiting                                         ⏳ Спринт 3
+🟡 P2  ├── Тесты (pytest)                                        ✅ 198 тестов
+🟡 P2  └── Docker                                                ⏳
 
 Месяц 2+ ───────────────────────────────────────────────────
+🟢 P3  ├── Переход на БД — по триггерам (история затрат / >10K моделей)
 🟢 P3  ├── Smart Router v2 — Agent Framework
 🟢 P3  ├── Skill Prompting Engine
 🟢 P3  ├── CLI (`sr chat`)
@@ -589,6 +652,8 @@ class SkillEngine:
 ```
 
 > ❌ Снято с приоритета (отклонено 2026-07-01): sub-agent fallback heuristic (Step 1.1), fingerprint_user_messages — естественный язык (Step 1.2). Coordinator в Zed маршрутизирует sub-agent'ов через `[AGENT:name]` тег — эвристика не нужна и может ломать короткие Coordinator-промпты.
+>
+> ❌ Снято с приоритета (2026-11): переход на БД на текущем этапе — JSON остаётся (конфиг ручной и версионируемый, кеш регенерируем, статистика in-memory). БД нужна только при появлении истории затрат по дням, >1 параллельного писателя, аудит-трейла конфига или >10K моделей.
 
 ---
 
@@ -614,14 +679,69 @@ class SkillEngine:
 - [x] **🟠 P1: Phase 2.6 — Дехардкод: единый источник правды** (routing.json role_models, авто-fallback, изоляция тестов conftest)
 - [x] **🧪 Phase 2: 61 тест (roles, fallback, ports, models)**
 - [x] **📊 Итого: 143 теста, все зелёные**
-- [ ] 🟠 P1: Fine tuning в админке (параметры + промпты)
-- [ ] 🟠 P1: Динамические цены моделей
-- [x] 🟠 P1: Разделение портов (Step 2.3, commit b927094)
-- [ ] 🟡 P2: Provider failover
-- [ ] 🟡 P2: Docker
-- [ ] 🟢 P3: Smart Router v2 — Agent Framework
-- [ ] 🟢 P3: Skill Prompting Engine
-- [ ] 🟢 P3: CLI
 - [x] **🔧 Fix FastAPI startup: replace deprecated `@app.on_event("shutdown")` with `@asynccontextmanager` lifespan** (commit f8edbb0)
 - [x] **🔍 Code review SmartRouter** (2026-07-01): выявлены P1-P3, подтверждена стабильная работа архитектуры `[AGENT:name]` → role mapping
 - [ ] ~~🔴 Step 2.5 (sub-agent fallback heuristic)~~ → ❌ ОТКЛОНЁН 2026-07-01 (Coordinator в Zed сам маршрутизирует через `[AGENT:name]`, эвристика не нужна)
+- [x] **🔌 Transport hardening: ретраи при сетевых/SSL-ошибках, connect-таймаут 20 с, per-provider `verify_ssl` / `ca_bundle`, честный текст ошибки в SSE** (commit 66204a2, 2026-11)
+- [x] **🔐 P0: атомарная запись конфигов** — `*.tmp` + `os.replace()`, битый `routing.json` сохраняется как `*.broken` и не перезаписывается дефолтами (commit 04d1fd8, 2026-11)
+- [x] **📚 План мультипровайдерной переработки** — `MULTIPROVIDER_PLAN.md` (commit ec52f46)
+- [x] **📊 Итого: 198 тестов, все зелёные** (`pytest tests/ -q`)
+- [ ] 🟠 P1: **Phase 1 — каталог моделей по провайдерам** (+ фильтрация text→text)
+- [ ] 🟠 P1: **Phase 2 — `resolve_model_spec`, ключи `provider::model_id`, провайдер определяется по модели**
+- [ ] 🟠 P1: **Phase 3 — cross-provider fallback** (Спринт 2)
+- [ ] 🟠 P1: **Phase 4 — цены, валюты, лимиты** (Спринт 2)
+- [ ] 🟡 P2: **Phase 5 — UX админки** (тест соединения, счётчики моделей, фильтры) (Спринт 3)
+- [ ] 🟡 P2: Rate limiting
+- [ ] 🟡 P2: JSON-логи + Request ID
+- [ ] 🟢 P3: **Переход на БД** — только при появлении истории затрат по дням, >1 параллельного писателя, аудит-трейла конфига или >10K моделей
+
+---
+
+## 🧩 Спринт 2026-11 — Мультипровайдерность
+
+> Полный архитектурный план: **[MULTIPROVIDER_PLAN.md](MULTIPROVIDER_PLAN.md)**. Ниже — статус и принятые решения.
+
+### Цель
+
+Сделать SmartRouter **провайдер-независимым**: любой OpenAI-совместимый провайдер (RouterAI, OpenRouter, локальный Ollama) добавляется через админку, его модели сканируются и управляются там же, а модели свободно назначаются ролям Coordinator / Worker **без перезапуска** роутера.
+
+### Принятые решения
+
+| # | Вопрос | Решение |
+|---|--------|---------|
+| 1 | Формат ключа модели | `provider::model_id` (`::` не встречается в ID моделей) |
+| 2 | Валюты | RUB и USD хранятся **раздельно**, конверсия на лету по настраиваемому курсу |
+| 3 | `config.yaml: models:` | Остаётся как **ручной override цен** (ручное значение выигрывает у каталога API) |
+| 4 | Провайдер без ключа (Ollama) | Флаг `requires_api_key: false` в конфиге провайдера |
+| 5 | Глобальный переключатель провайдера | Переименован в `default_provider`; используется **только** как fallback для bare-ID и моделей вне каталога; из UI убирается |
+| 6 | `GET /v1/models` | Возвращает составные ID (`provider::model`) |
+| 7 | Состав провайдеров | `routerai`, `openrouter`, `ollama` встроены; расширяется любым OpenAI-совместимым |
+| 8 | Хранилище | JSON остаётся (см. «Отклонено» ниже) |
+
+### Статус фаз
+
+| Фаза | Что | Статус |
+|-------|-----|--------|
+| **Phase 0** | Атомарная запись конфигов | ✅ 2026-11 (`04d1fd8`) |
+| **Phase 1** | Каталог моделей по провайдерам: `state.models_by_provider`, адаптеры цен (`per_token_rub` / `per_token_usd` / `free`), фильтрация text→text, миграция формата кеша, `POST /models/sync` с параметром `provider`, колонка Provider в админке | ⏳ **следующий** |
+| **Phase 2** | `resolve_model_spec(spec) -> (provider, model_id)`; `proxy()` берёт URL и ключ **из модели**, а не из глобального провайдера; `body["model"]` уходит без префикса `provider::`; `log_usage()` по составному ключу с валютой; `role_fallbacks` в `routing.json`; `<optgroup>` в выпадающих списках ролей | ⏳ далее |
+| **Phase 3** | Cross-provider fallback | ⏳ Спринт 2 |
+| **Phase 4** | Цены / валюты / лимиты | ⏳ Спринт 2 |
+| **Phase 5** | UX админки: тест соединения, счётчики моделей, фильтры | ⏳ Спринт 3 |
+
+### ❌ Отклонено
+
+- ~~**Переход на БД (SQLite / Postgres) на текущем этапе**~~ — JSON остаётся: конфиг должен оставаться ручным и версионируемым в git, кеш моделей регенерируем, статистика — in-memory агрегаты. БД нужна только при появлении: истории затрат по дням, >1 параллельного писателя, аудит-трейла конфига или >10K моделей. → P3 с триггерами.
+- ~~**Глобальное отключение проверки TLS**~~ — вместо этого per-provider `verify_ssl` / `ca_bundle` (реализовано в `66204a2`).
+
+---
+
+## 🐛 Известные баги (не исправлены)
+
+| # | Баг | Где | План |
+|---|-----|-----|------|
+| **1** | **Валюты в `log_usage()` перепутаны** — стоимость считается как ₽ за 1M токенов, но подписывается `$`. Фактические цены RouterAI — в рублях за токен, OpenRouter — строки в USD, Ollama — бесплатно | `router.py:log_usage` | Phase 4 |
+| **2** | **Фиктивный fallback цен** `{0.50, 1.50}` для неизвестных моделей — в статистику попадают выдуманные числа | `router.py:log_usage` | Phase 4 |
+| **3** | **Цены в `config.yaml: models:` выдуманы** — например `deepseek-v4-pro: 0.5` против реальных ~131.95 ₽/1M | `config.yaml` | Phase 4 (ручной override) |
+| **4** | **Каталог моделей загрязнён** — 401 модель, из них лишь ~15% text→text. Нужен фильтр по `architecture.output_modalities` и `pricing_units.prompt == "token"` | `router.py:sync_models_from_provider` | Phase 1 |
+| **5** | **Статистика не переживает перезапуск** — in-memory агрегаты | `router.py:state.stats` | P3 |
