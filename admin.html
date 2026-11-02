@@ -802,6 +802,18 @@ Loading...</pre>
                     />
                 </div>
                 <div class="config-row">
+                    <label>CA bundle (self-signed):</label>
+                    <input
+                        type="text"
+                        id="pf-ca"
+                        placeholder="C:/certs/company-ca.pem (пусто = системный CA)"
+                        style="min-width: 300px"
+                    />
+                    <span style="font-size: 12px; color: #8b949e"
+                        >(нужен, если провайдер/корпоративный шлюз использует свой CA)</span
+                    >
+                </div>
+                <div class="config-row">
                     <div class="toggle-wrap">
                         <label class="toggle">
                             <input type="checkbox" id="pf-default" />
@@ -809,6 +821,15 @@ Loading...</pre>
                         </label>
                         <span style="font-size: 13px; color: #8b949e"
                             >Set as default provider</span
+                        >
+                    </div>
+                    <div class="toggle-wrap" style="margin-left: 20px">
+                        <label class="toggle">
+                            <input type="checkbox" id="pf-verify-ssl" checked />
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span style="font-size: 13px; color: #8b949e"
+                            >Verify SSL (отключи только для self-signed)</span
                         >
                     </div>
                 </div>
@@ -1501,6 +1522,10 @@ Loading...</pre>
                         document.getElementById("pf-key").value = "";
                         document.getElementById("pf-models").value =
                             p.models_endpoint || "";
+                        document.getElementById("pf-ca").value =
+                            p.ca_bundle || "";
+                        document.getElementById("pf-verify-ssl").checked =
+                            p.verify_ssl !== false;
                         document.getElementById("pf-default").checked =
                             p.default || false;
                         switchTab("providers");
@@ -1516,6 +1541,7 @@ Loading...</pre>
                     "pf-keyenv",
                     "pf-key",
                     "pf-models",
+                    "pf-ca",
                 ].forEach(function (id) {
                     var el = document.getElementById(id);
                     if (el) {
@@ -1525,6 +1551,8 @@ Loading...</pre>
                 });
                 var cb = document.getElementById("pf-default");
                 if (cb) cb.checked = false;
+                var vs = document.getElementById("pf-verify-ssl");
+                if (vs) vs.checked = true;
             }
 
             function saveProvider() {
@@ -1536,6 +1564,8 @@ Loading...</pre>
                 var keyenv = document.getElementById("pf-keyenv").value.trim();
                 var key = document.getElementById("pf-key").value.trim();
                 var models = document.getElementById("pf-models").value.trim();
+                var ca = document.getElementById("pf-ca").value.trim();
+                var verifySsl = document.getElementById("pf-verify-ssl").checked;
                 var isDefault = document.getElementById("pf-default").checked;
 
                 if (!name) {
@@ -1554,6 +1584,8 @@ Loading...</pre>
                     api_key_env: keyenv || name.toUpperCase() + "_API_KEY",
                     api_key: key,
                     models_endpoint: models,
+                    ca_bundle: ca,
+                    verify_ssl: verifySsl,
                     default: isDefault,
                 };
 

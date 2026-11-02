@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -348,10 +349,10 @@ class RouterState:
 
         async with self.models_lock:
             try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.get(endpoint)
-                    resp.raise_for_status()
-                    data = resp.json()
+                client = get_provider_client("routerai")
+                resp = await client.get(endpoint, timeout=30.0)
+                resp.raise_for_status()
+                data = resp.json()
             except Exception as e:
                 logger.error(f"Ошибка синхронизации моделей с RouterAI: {e}")
                 raise
@@ -900,15 +901,130 @@ def smart_route_model(
 async def lifespan(app: FastAPI):
     """Современный способ задать startup/shutdown (заменяет @app.on_event)."""
     yield
-    # shutdown: закрываем HTTP-клиент
+    # shutdown: закрываем HTTP-клиенты
     await http_client.aclose()
+    for _client in list(_provider_clients.values()):
+        await _client.aclose()
+    _provider_clients.clear()
 
 
 app = FastAPI(title="SmartRouter", lifespan=lifespan)
 
 
+# ============================================================
+# 🔌 ТРАНСПОРТ: таймауты, ретраи, SSL-контексты провайдеров
+# ============================================================
+# Общий таймаут запроса + отдельный таймаут установления соединения (TLS).
+# Раньше connect-таймаута не было — «висящий» TLS handshake держал слот 180с.
+REQUEST_TIMEOUT = float(os.getenv("ROUTER_REQUEST_TIMEOUT", "180"))
+CONNECT_TIMEOUT = float(os.getenv("ROUTER_CONNECT_TIMEOUT", "20"))
+
+# Повторы при сетевых ошибках (TLS handshake / connect / read timeout).
+# Безопасно: при этих ошибках запрос ещё НЕ дошёл до провайдера.
+RETRY_ATTEMPTS = int(os.getenv("ROUTER_RETRY_ATTEMPTS", "3"))
+RETRY_BACKOFF = float(os.getenv("ROUTER_RETRY_BACKOFF", "0.7"))
+
 # Глобальный HTTP клиент для переиспользования соединений (Connection Pooling)
-http_client = httpx.AsyncClient(timeout=180.0)
+http_client = httpx.AsyncClient(
+    timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=CONNECT_TIMEOUT)
+)
+
+# Ошибки, при которых запрос можно безопасно повторить
+RETRYABLE_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout)
+
+# Кэш отдельных клиентов для провайдеров с кастомными SSL-настройками
+_provider_clients: Dict[str, httpx.AsyncClient] = {}
+
+
+def get_provider_client(provider_name: str) -> httpx.AsyncClient:
+    """
+    Возвращает HTTP-клиент для провайдера.
+
+    Провайдеры без кастомных SSL-настроек используют общий http_client
+    (connection pool + keep-alive). Если в конфиге провайдера задан ca_bundle
+    (корпоративный CA / self-signed) или verify_ssl: false — создаём отдельный
+    клиент со своим SSL-контекстом.
+    """
+    provider = state.providers.get(provider_name, {})
+    ca_bundle = provider.get("ca_bundle")
+    verify_ssl = provider.get("verify_ssl", True)
+    if verify_ssl and not ca_bundle:
+        return http_client
+
+    cache_key = f"{provider_name}|{ca_bundle}|{verify_ssl}"
+    client = _provider_clients.get(cache_key)
+    if client is not None:
+        return client
+
+    try:
+        if verify_ssl:
+            ctx = (
+                ssl.create_default_context(cafile=ca_bundle)
+                if ca_bundle
+                else ssl.create_default_context()
+            )
+        else:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+    except Exception as e:
+        logger.error(f"Ошибка создания SSL-контекста для '{provider_name}': {e}")
+        return http_client
+
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=CONNECT_TIMEOUT), verify=ctx
+    )
+    _provider_clients[cache_key] = client
+    logger.info(
+        f"🔐 Отдельный SSL-клиент для провайдера '{provider_name}' "
+        f"(verify={verify_ssl}, ca_bundle={ca_bundle or 'system'})"
+    )
+    return client
+
+
+def invalidate_provider_clients(provider_name: str):
+    """Сбрасывает кэш SSL-клиентов провайдера (после смены настроек SSL)."""
+    stale = [k for k in _provider_clients if k.startswith(f"{provider_name}|")]
+    for key in stale:
+        client = _provider_clients.pop(key)
+        try:
+            # close() — синхронный сброс пула; lifespan закроет клиент при остановке
+            client.close()
+        except Exception:
+            pass
+    if stale:
+        logger.info(f"🔄 Сброшен кэш SSL-клиентов для провайдера '{provider_name}'")
+
+
+async def post_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    body: dict,
+    headers: dict,
+    label: str = "",
+    attempts: int = RETRY_ATTEMPTS,
+):
+    """
+    POST с повторами при сетевых/SSL-ошибках.
+
+    Повторяем только ошибки уровня соединения (TLS handshake, connect, read timeout) —
+    в этих случаях запрос точно не был отправлен провайдеру, поэтому повтор безопасен.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await client.post(url, json=body, headers=headers)
+        except RETRYABLE_ERRORS as e:
+            last_exc = e
+            if attempt >= attempts:
+                raise
+            delay = RETRY_BACKOFF * (2 ** (attempt - 1))
+            logger.warning(
+                f"🔄 Повтор {attempt}/{attempts} через {delay:.1f}s — "
+                f"{type(e).__name__}: {e} → {url} {label}"
+            )
+            await asyncio.sleep(delay)
+    raise last_exc  # pragma: no cover — недостижимо
 
 
 @app.get("/", include_in_schema=False)
@@ -1136,6 +1252,9 @@ async def add_provider(request: Request):
         "api_key_env": data.get("api_key_env", f"{name.upper()}_API_KEY"),
         "default": data.get("default", False),
         "models_endpoint": data.get("models_endpoint", ""),
+        # SSL: verify_ssl=false — для self-signed; ca_bundle — путь к своему CA
+        "verify_ssl": data.get("verify_ssl", True),
+        "ca_bundle": data.get("ca_bundle", ""),
     }
 
     if not provider["base_url"]:
@@ -1148,6 +1267,9 @@ async def add_provider(request: Request):
             del old_provider[k]
 
     state.providers[name] = provider
+
+    # SSL-настройки могли измениться — сбрасываем кэш клиентов этого провайдера
+    invalidate_provider_clients(name)
 
     # Если default — снимаем default с остальных
     if data.get("default", False):
@@ -1208,6 +1330,7 @@ async def delete_provider(name: str):
         raise HTTPException(status_code=400, detail="Cannot delete the last provider")
 
     del state.providers[name]
+    invalidate_provider_clients(name)
 
     # Если удалили активного — назначаем первого
     if name == state._active_provider:
@@ -1297,46 +1420,82 @@ async def proxy(request: Request):
 
     is_stream = body.get("stream", False)
 
+    # Клиент с учётом SSL-настроек провайдера (ca_bundle / verify_ssl)
+    client = get_provider_client(state._active_provider)
+
     if is_stream:
 
         async def stream_generator():
-            try:
-                async with http_client.stream(
-                    "POST", target_url, json=body, headers=headers
-                ) as resp:
-                    if resp.status_code != 200:
-                        error_text = await resp.aread()
-                        logger.error(
-                            f"Провайдер вернул {resp.status_code}: {error_text.decode('utf-8', errors='ignore')}"
-                        )
-                        yield f'data: {{"error": "Provider error {resp.status_code}"}}\n\n'
+            attempt = 0
+            sent_any = False
+            while True:
+                try:
+                    async with client.stream(
+                        "POST", target_url, json=body, headers=headers
+                    ) as resp:
+                        if resp.status_code != 200:
+                            error_text = await resp.aread()
+                            logger.error(
+                                f"Провайдер вернул {resp.status_code}: "
+                                f"{error_text.decode('utf-8', errors='ignore')} → {target_url}"
+                            )
+                            yield f'data: {{"error": "Provider error {resp.status_code}"}}\n\n'
+                            return
+
+                        usage_found = False
+                        async for chunk in resp.aiter_lines():
+                            if chunk.startswith("data: "):
+                                try:
+                                    data = json.loads(chunk[6:])
+                                    if "usage" in data and data["usage"]:
+                                        usage = data["usage"]
+                                        log_usage(
+                                            actual_model,
+                                            usage.get("prompt_tokens", 0),
+                                            usage.get("completion_tokens", 0),
+                                        )
+                                        usage_found = True
+                                except json.JSONDecodeError:
+                                    pass
+
+                            # Если aiter_lines(), нужно возвращать с двойным переносом для SSE
+                            if chunk:
+                                sent_any = True
+                                yield chunk + "\n\n"
+
+                        if not usage_found:
+                            log_usage(actual_model, 0, 0)
                         return
-
-                    usage_found = False
-                    async for chunk in resp.aiter_lines():
-                        if chunk.startswith("data: "):
-                            try:
-                                data = json.loads(chunk[6:])
-                                if "usage" in data and data["usage"]:
-                                    usage = data["usage"]
-                                    log_usage(
-                                        actual_model,
-                                        usage.get("prompt_tokens", 0),
-                                        usage.get("completion_tokens", 0),
-                                    )
-                                    usage_found = True
-                            except json.JSONDecodeError:
-                                pass
-
-                        # Если aiter_lines(), нужно возвращать с двойным переносом для SSE
-                        if chunk:
-                            yield chunk + "\n\n"
-
-                    if not usage_found:
-                        log_usage(actual_model, 0, 0)
-            except Exception as e:
-                logger.error(f"Ошибка streaming ({type(e).__name__}): {e}")
-                yield f'data: {{"error": "Internal Proxy Error"}}\n\n'
+                except RETRYABLE_ERRORS as e:
+                    attempt += 1
+                    # Повторяем только если клиент ещё не получил ни одного байта
+                    if not sent_any and attempt < RETRY_ATTEMPTS:
+                        delay = RETRY_BACKOFF * (2 ** (attempt - 1))
+                        logger.warning(
+                            f"🔄 Streaming: повтор {attempt}/{RETRY_ATTEMPTS} через "
+                            f"{delay:.1f}s — {type(e).__name__}: {e} → {target_url}"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    logger.error(
+                        f"Ошибка streaming ({type(e).__name__}): {e} → {target_url}"
+                    )
+                    yield (
+                        "data: "
+                        + json.dumps({"error": f"{type(e).__name__}: {e}"})
+                        + "\n\n"
+                    )
+                    return
+                except Exception as e:
+                    logger.error(
+                        f"Ошибка streaming ({type(e).__name__}): {e} → {target_url}"
+                    )
+                    yield (
+                        "data: "
+                        + json.dumps({"error": f"{type(e).__name__}: {e}"})
+                        + "\n\n"
+                    )
+                    return
 
         return StreamingResponse(stream_generator(), media_type="text/event-stream")
     else:
@@ -1352,7 +1511,9 @@ async def proxy(request: Request):
             is_last = i == len(chain) - 1
             try:
                 body["model"] = model
-                resp = await http_client.post(target_url, json=body, headers=headers)
+                resp = await post_with_retry(
+                    client, target_url, body, headers, label=f"(model={model})"
+                )
                 resp.raise_for_status()
                 result = resp.json()
 
