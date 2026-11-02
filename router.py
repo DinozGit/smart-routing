@@ -220,8 +220,11 @@ class RouterState:
                 logger.info(f"✅ Загружена конфигурация из {self.config_file}")
             except Exception as e:
                 logger.error(f"Ошибка загрузки {self.config_file}: {e}")
+                # НЕ перезаписываем файл: сначала сохраняем битую копию,
+                # иначе пользователь потеряет настройки ролей безвозвратно.
+                self._backup_broken_file(self.config_file)
                 self._init_default_config()
-                migrated = True
+                migrated = False
         else:
             self._init_default_config()
             migrated = True
@@ -312,6 +315,35 @@ class RouterState:
             },
         }
 
+    @staticmethod
+    def _backup_broken_file(path: Path):
+        """Переименовывает битый файл в *.broken — чтобы не потерять данные."""
+        try:
+            backup = path.with_suffix(path.suffix + ".broken")
+            if backup.exists():
+                backup.unlink()
+            path.replace(backup)
+            logger.warning(f"⚠️ Битый конфиг сохранён как {backup.name}")
+        except Exception as e:
+            logger.error(f"Не удалось сохранить битый конфиг: {e}")
+
+    @staticmethod
+    def _atomic_write(path: Path, content: str):
+        """
+        Атомарная запись файла.
+
+        Пишем во временный файл рядом с целью и переименовываем через os.replace()
+        — на Windows/Linux это атомарно. Без этого прерванная запись (Ctrl+C,
+        падение, два процесса сразу) оставляла config.yaml/routing.json битыми,
+        и роутер стартовал с дефолтами, молча затирая настройки ролей.
+        """
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+
     def _load_models_cache(self):
         """Загружает кеш моделей из models_cache.json."""
         if self.models_cache_file.exists():
@@ -327,6 +359,7 @@ class RouterState:
                 )
             except Exception as e:
                 logger.error(f"Ошибка загрузки models_cache.json: {e}")
+                self._backup_broken_file(self.models_cache_file)
                 self.available_models = {}
 
     def get_model_info(self, model_id: str) -> dict | None:
@@ -388,10 +421,9 @@ class RouterState:
                 "provider": "routerai",
             }
             await asyncio.to_thread(
-                lambda: self.models_cache_file.write_text(
-                    json.dumps(cache_data, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
+                self._atomic_write,
+                self.models_cache_file,
+                json.dumps(cache_data, indent=2, ensure_ascii=False),
             )
             logger.info(
                 f"🔄 Синхронизировано {len(self.available_models)} моделей из RouterAI"
@@ -414,17 +446,17 @@ class RouterState:
         cfg_copy["providers"] = self.providers
         async with self.config_lock:
             await asyncio.to_thread(
-                lambda: Path(CONFIG_FILE).write_text(
+                lambda: self._atomic_write(
+                    Path(CONFIG_FILE),
                     yaml.dump(cfg_copy, default_flow_style=False, allow_unicode=True),
-                    encoding="utf-8",
                 )
             )
         logger.info(f"✅ config.yaml обновлён с провайдерами")
 
     @staticmethod
     def _sync_write_config(path: Path, data: dict):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        """Атомарная запись JSON-конфига (tmp + os.replace)."""
+        RouterState._atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
 
 
 state = RouterState()
@@ -1294,7 +1326,7 @@ async def add_provider(request: Request):
 
 
 async def set_env_key(key_env: str, value: str):
-    """Записывает/обновляет API-ключ в .env файл."""
+    """Записывает/обновляет API-ключ в .env файл (атомарно)."""
     env_file = Path(__file__).parent / ".env"
     if env_file.exists():
         content = env_file.read_text(encoding="utf-8")
@@ -1310,12 +1342,12 @@ async def set_env_key(key_env: str, value: str):
                     lines.append(line)
             if not replaced:
                 lines.append(f"{key_env}={value}")
-            env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            state._atomic_write(env_file, "\n".join(lines) + "\n")
         else:
             with open(env_file, "a", encoding="utf-8") as f:
                 f.write(f"\n{key_env}={value}\n")
     else:
-        env_file.write_text(f"{key_env}={value}\n", encoding="utf-8")
+        state._atomic_write(env_file, f"{key_env}={value}\n")
     # Обновляем в runtime
     load_dotenv(override=True)
     logger.info(f"🔑 API-ключ {key_env} обновлён в .env")
