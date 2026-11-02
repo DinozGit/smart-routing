@@ -269,6 +269,70 @@
                 border-color: #58a6ff;
                 outline: none;
             }
+            /*
+             * Prompt editor (Fine Tuning -> System Prompt Prefix).
+             * The selector is intentionally more specific than `.config-row textarea`
+             * (0,2,1 vs 0,1,1) so that font-family / min-width / min-height /
+             * width are not overridden by the shared rule.
+             */
+            .config-row textarea.prompt-editor {
+                width: 100%;
+                min-width: 100%;
+                min-height: 280px;
+                resize: vertical;
+                font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+                    Consolas, monospace;
+                font-size: 13px;
+                line-height: 1.55;
+                tab-size: 4;
+                white-space: pre-wrap;
+            }
+            .prompt-title-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                margin-bottom: 12px;
+            }
+            .prompt-title-row .config-title {
+                margin-bottom: 0;
+            }
+            .prompt-hint {
+                display: flex;
+                align-items: baseline;
+                justify-content: space-between;
+                gap: 12px;
+                flex-wrap: wrap;
+            }
+            .prompt-count {
+                font-size: 11px;
+                color: #8b949e;
+                font-variant-numeric: tabular-nums;
+                white-space: nowrap;
+            }
+            .btn-ghost {
+                padding: 4px 10px;
+                border-radius: 6px;
+                border: 1px solid #30363d;
+                background: transparent;
+                color: #8b949e;
+                cursor: pointer;
+                font-size: 12px;
+                font-weight: 600;
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                white-space: nowrap;
+            }
+            .btn-ghost:hover {
+                color: #c9d1d9;
+                border-color: #58a6ff;
+                background: #58a6ff1a;
+            }
+            .btn-ghost:focus-visible {
+                outline: 2px solid #58a6ff;
+                outline-offset: 2px;
+            }
             .readonly-val {
                 font-size: 13px;
                 color: #58a6ff;
@@ -774,17 +838,40 @@ Loading...</pre>
             </div>
 
             <div class="config-card">
-                <div class="config-title">📝 System Prompt Prefix</div>
+                <div class="prompt-title-row">
+                    <div class="config-title">📝 System Prompt Prefix</div>
+                    <button
+                        type="button"
+                        class="btn-ghost"
+                        id="btn-toggle-prefix-full"
+                        onclick="togglePrefixFullscreen()"
+                        aria-expanded="false"
+                        aria-controls="tuning-prefix"
+                        title="Развернуть редактор на весь экран"
+                    >
+                        ⛶ Expand
+                    </button>
+                </div>
                 <div class="config-row">
                     <textarea
                         id="tuning-prefix"
+                        class="prompt-editor"
+                        aria-label="System Prompt Prefix"
                         placeholder="Prepended before the client's system prompt..."
+                        spellcheck="false"
+                        autocomplete="off"
+                        oninput="updatePrefixCount()"
                     ></textarea>
                 </div>
-                <span style="font-size: 11px; color: #8b949e"
-                    >This text is prepended to the existing system prompt (does
-                    not replace it).</span
-                >
+                <div class="prompt-hint">
+                    <span style="font-size: 11px; color: #8b949e"
+                        >This text is prepended to the existing system prompt (does
+                        not replace it).</span
+                    >
+                    <span id="tuning-prefix-count" class="prompt-count"
+                        >0 символов</span
+                    >
+                </div>
             </div>
 
             <button
@@ -2433,6 +2520,69 @@ Loading...</pre>
                     val.textContent = parseFloat(slider.value).toFixed(1);
             }
 
+            // ========== System prompt prefix editor ==========
+            const PREFIX_EDITOR_FULL_HEIGHT = "calc(100vh - 160px)";
+
+            function formatCharCount(n) {
+                if (n >= 1000000) {
+                    const m = n / 1000000;
+                    const text =
+                        m >= 100 ? Math.round(m) + "M" : m.toFixed(1).replace(/\.0$/, "") + "M";
+                    return text + " символов";
+                }
+                if (n > 1000) {
+                    const k = n / 1000;
+                    const text =
+                        k >= 100
+                            ? Math.round(k) + "K"
+                            : k.toFixed(1).replace(/\.0$/, "") + "K";
+                    return text + " символов";
+                }
+                const mod10 = n % 10;
+                const mod100 = n % 100;
+                let word = "символов";
+                if (mod10 === 1 && mod100 !== 11) {
+                    word = "символ";
+                } else if (
+                    mod10 >= 2 &&
+                    mod10 <= 4 &&
+                    !(mod100 >= 12 && mod100 <= 14)
+                ) {
+                    word = "символа";
+                }
+                return n + " " + word;
+            }
+
+            function updatePrefixCount() {
+                const ta = document.getElementById("tuning-prefix");
+                const out = document.getElementById("tuning-prefix-count");
+                if (!ta || !out) return;
+                // Count code points, so emoji/surrogate pairs count as one char
+                const n = Array.from(ta.value).length;
+                out.textContent = formatCharCount(n);
+            }
+
+            function togglePrefixFullscreen() {
+                const ta = document.getElementById("tuning-prefix");
+                const btn = document.getElementById("btn-toggle-prefix-full");
+                if (!ta || !btn) return;
+                const expanded = btn.getAttribute("aria-expanded") === "true";
+                if (expanded) {
+                    ta.style.height = "";
+                    ta.style.minHeight = "";
+                    btn.setAttribute("aria-expanded", "false");
+                    btn.textContent = "⛶ Expand";
+                    btn.title = "Развернуть редактор на весь экран";
+                } else {
+                    ta.style.height = PREFIX_EDITOR_FULL_HEIGHT;
+                    ta.style.minHeight = PREFIX_EDITOR_FULL_HEIGHT;
+                    btn.setAttribute("aria-expanded", "true");
+                    btn.textContent = "⛶ Collapse";
+                    btn.title = "Свернуть редактор";
+                }
+                ta.focus();
+            }
+
             async function loadTuning() {
                 try {
                     const resp = await fetch("/roles/tuning");
@@ -2462,6 +2612,7 @@ Loading...</pre>
 
                 document.getElementById("tuning-prefix").value =
                     data.system_prompt_prefix || "";
+                updatePrefixCount();
 
                 // Fetch role detail for context_limit
                 fetch("/roles/" + role + "/tuning")
@@ -2570,6 +2721,7 @@ Loading...</pre>
                 setSlider("tuning-presence_penalty", d.presence_penalty);
                 setSlider("tuning-frequency_penalty", d.frequency_penalty);
                 document.getElementById("tuning-prefix").value = "";
+                updatePrefixCount();
 
                 const status = document.getElementById("tuning-status");
                 status.className = "save-status ok";
