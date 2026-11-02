@@ -182,6 +182,8 @@ class RouterState:
             "total_input": 0,
             "total_output": 0,
             "total_cost": 0.0,
+            "currency": cfg.get("currency", {}).get("base", "RUB"),
+            "usd_rate": float(cfg.get("currency", {}).get("usd_rate", 90.0)),
             "by_currency": {},
             "usd_equivalent": 0.0,
             "by_model": {},
@@ -845,6 +847,32 @@ def sanitize_ascii(value: str) -> str:
     return re.sub(r"[^\x00-\x7F]+", "", str(value))
 
 
+def _to_base_factor(currency: str) -> float:
+    """
+    Сколько единиц базовой валюты стоит 1 единица `currency`.
+
+    - Базовая валюта (RUB) → 1.0
+    - USD → usd_rate (сколько RUB за 1 USD)
+    - Опциональные валюты из rates: сколько RUB за 1 единицу
+    - NONE → 1.0 (бесплатные модели, цена 0)
+    """
+    if currency == "NONE":
+        return 1.0
+    currency_cfg = cfg.get("currency", {})
+    base = currency_cfg.get("base", "RUB")
+    if currency == base:
+        return 1.0
+    if currency == "USD":
+        return float(currency_cfg.get("usd_rate", 90.0))
+    rates = currency_cfg.get("rates", {}) or {}
+    if currency in rates:
+        return float(rates[currency])
+    logger.warning(
+        f"\u26a0\ufe0f Неизвестная валюта '{currency}', коэффициент 1.0"
+    )
+    return 1.0
+
+
 def log_usage(model: str, input_tokens: int, output_tokens: int):
     """Обновляет статистику и логирует (Phase 2 — per-provider)."""
     state.stats["requests"] += 1
@@ -897,18 +925,9 @@ def log_usage(model: str, input_tokens: int, output_tokens: int):
         input_tokens * inp_price + output_tokens * out_price
     ) / 1_000_000
 
-    # Конвертация в базовую валюту (currency.base = RUB)
-    currency_cfg = cfg.get("currency", {})
-    rates = currency_cfg.get("rates", {})
-    if currency in rates:
-        rate = float(rates[currency])
-    else:
-        rate = 1.0
-        if currency != "NONE":
-            logger.warning(
-                f"\u26a0\ufe0f Валюта '{currency}' не найдена в rates, используется rate=1.0"
-            )
-    state.stats["total_cost"] += cost * rate  # в базовой валюте
+    # Конвертация в базовую валюту через _to_base_factor
+    factor = _to_base_factor(currency)
+    state.stats["total_cost"] += cost * factor  # в базовой валюте
 
     # По-валютный учёт (в native-валюте)
     if currency not in state.stats["by_currency"]:
@@ -916,7 +935,7 @@ def log_usage(model: str, input_tokens: int, output_tokens: int):
     state.stats["by_currency"][currency] += cost
 
     # USD-эквивалент (из native-стоимости)
-    usd_rate = currency_cfg.get("usd_rate", 90.0)
+    usd_rate = state.stats.get("usd_rate", 90.0)
     if currency == "USD":
         state.stats["usd_equivalent"] += cost
     elif currency == "NONE":
@@ -940,7 +959,7 @@ def log_usage(model: str, input_tokens: int, output_tokens: int):
     model_stat["cost"] += cost
 
     logger.info(
-        f"\U0001f4b0 {model}: In {input_tokens} | Out {output_tokens} | Cost {cost:.4f} {currency}"
+        f"\U0001f4b0 {model}: In {input_tokens} | Out {output_tokens} | Cost {cost:.6f} {currency}"
     )
 
 

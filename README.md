@@ -313,7 +313,7 @@ smart-routing/
 │   └── PROVIDER_CONTRACT.md # Контракт каталога/ключей/валют (источник правды)
 ├── .env               # API-ключи
 ├── requirements.txt   # Зависимости
-├── AGENTS.md          # Конфигурация агентов CalorIt
+├── AGENTS.md          # Протокол мультиагентной работы и маршрутизации
 └── README.md          # Документация
 ```
 
@@ -424,15 +424,15 @@ AGENTS.md инструктирует Coordinator добавлять `[AGENT:data
 
 Паттерны искали технические термины (`database/*.py`, `alembic/versions/*.py`), а Coordinator даёт задачу естественным языком.
 
-→ Решение: функция оставлена в коде, но **не вызывается** (`smart_route_model()` содержит только 3 шага). Это осознанное решение, а не забытый код — см. `ROADMAP.md` (шаги 1.1 / 1.2 / 2.5 отклонены).
+→ Решение: **fingerprinting отключён** (`a711cd6`), а в 2026-11 его код **удалён целиком** (~317 строк) вместе с тестами `tests/phase1/test_natural_lang.py`. Роль определяется только по тегу `[AGENT:name]` — см. `ROADMAP.md` (шаги 1.1 / 1.2 / 2.5 отклонены).
 
 ### Как работает сейчас
 
 ```
-1. Coordinator вызывает spawn_agent("🗄️ CalorIt Database", "[AGENT:database] Создай таблицу users")
+1. Coordinator вызывает spawn_agent("🔧 API", "[AGENT:api] Добавь эндпоинт POST /models/sync")
 2. Zed создаёт sub-agent thread с этим user-сообщением
-3. SmartRouter: smart_route_model() видит тег [AGENT:database]
-4. → agent_to_worker_mapping["database"] → роль worker_default → её модель
+3. SmartRouter: smart_route_model() видит тег [AGENT:api]
+4. → agent_to_worker_mapping["api"] → роль worker_default → её модель
 5. Модель Coordinator в это время не тратится
 ```
 

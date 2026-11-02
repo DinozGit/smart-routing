@@ -6,10 +6,10 @@ import pytest
 
 
 class TestSubAgentFallback:
-    """Шаг 2.5 — если system prompt короткий и не CalorIt → default_worker."""
+    """Шаг 2.5 — короткий system prompt без проектного контекста → default_worker."""
 
     async def test_generic_prompt_goes_to_default(self, client):
-        """Generic system prompt без CalorIt → не Coordinator, а default_worker."""
+        """Generic system prompt без проектного контекста → не Coordinator, а default_worker."""
         resp = await client.post(
             "/v1/chat/completions",
             json={

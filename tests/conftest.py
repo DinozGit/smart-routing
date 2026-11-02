@@ -146,11 +146,11 @@ def sample_coordinator_prompt() -> str:
 @pytest.fixture
 def sample_bot_prompt() -> str:
     return (
-        "You are CalorIt Telegram Bot.\n"
-        "Files: app/handlers/*.py, app/keyboards.py\n"
+        "You are a Telegram Bot.\n"
+        "Files: bot/handlers/*.py, bot/keyboards.py\n"
         "Responsibility: aiogram handlers, FSM states, inline keyboards, bot commands.\n"
-        "Write scope: handlers/*.py, keyboards.py\n"
-        "Read scope: app/services/*.py, app/database/crud.py, app/config.py"
+        "Write scope: bot/handlers/*.py, bot/keyboards.py\n"
+        "Read scope: services/*.py, database/crud.py, config.py"
     )
 
 

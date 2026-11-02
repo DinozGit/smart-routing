@@ -87,10 +87,7 @@ providers:
 
 currency:
   base: RUB
-  usd_rate: 90.0
-  rates:
-    RUB: 1.0
-    USD: 0.011111
+  usd_rate: 90.0        # 1 USD = 90 ₽ (RUB за 1 USD)
 
 roles:
   coordinator:

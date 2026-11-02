@@ -17,6 +17,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import router
 
 
+def _usd_rate() -> float:
+    """Курс из config.yaml — тесты не хардкодят 90.0."""
+    return float(router.cfg["currency"]["usd_rate"])
+
+
 # ============================================================
 # БАГ 1 — цена бралась у ЧУЖОГО провайдера
 # ============================================================
@@ -62,6 +67,8 @@ class TestBug1CrossProviderPriceLeak:
             "total_input": 0,
             "total_output": 0,
             "total_cost": 0.0,
+            "currency": router.cfg["currency"]["base"],
+            "usd_rate": _usd_rate(),
             "by_currency": {},
             "usd_equivalent": 0.0,
             "by_model": {},
@@ -91,8 +98,8 @@ class TestBug1CrossProviderPriceLeak:
         assert by_currency.get("USD", 0) == pytest.approx(expected_cost_usd, rel=1e-6), (
             f"Expected USD cost {expected_cost_usd}, got {by_currency}"
         )
-        # total_cost в RUB: 0.018 * 0.011111 = 0.000199998
-        expected_total_rub = expected_cost_usd * 0.011111
+        # total_cost в RUB: native USD * usd_rate (90 ₽ за 1 USD), НЕ / usd_rate
+        expected_total_rub = expected_cost_usd * _usd_rate()
         assert router.state.stats["total_cost"] == pytest.approx(expected_total_rub, rel=1e-6)
         # В by_currency НЕ ДОЛЖНО быть RUB (цена не из routerai)
         assert "RUB" not in by_currency, (
@@ -116,7 +123,7 @@ class TestBug1CrossProviderPriceLeak:
         assert by_currency.get("RUB", 0) == pytest.approx(expected_cost_rub, rel=1e-4), (
             f"Expected RUB cost {expected_cost_rub}, got {by_currency}"
         )
-        # total_cost в RUB (rate=1.0)
+        # total_cost в RUB (factor=1.0)
         assert router.state.stats["total_cost"] == pytest.approx(expected_cost_rub, rel=1e-4)
         assert "USD" not in by_currency
 
@@ -146,9 +153,9 @@ class TestBug1CrossProviderPriceLeak:
         expected_cost_usd = 4.0
         by_currency = router.state.stats["by_currency"]
         assert by_currency.get("USD", 0) == pytest.approx(expected_cost_usd, rel=1e-6)
-        # total_cost = 4.0 * 0.011111 = 0.044444 RUB
+        # total_cost = 4.0 * usd_rate = 360.0 RUB (НЕ 4.0 / usd_rate)
         assert router.state.stats["total_cost"] == pytest.approx(
-            expected_cost_usd * 0.011111, rel=1e-6
+            expected_cost_usd * _usd_rate(), rel=1e-6
         )
         assert "RUB" not in by_currency
 
@@ -163,8 +170,9 @@ class TestBug2TotalCostConversion:
     БАГ 2: by_currency копился в native-валюте (правильно), а total_cost
     складывал сырые значения рублей и долларов — сумма была бессмысленной.
 
-    Исправление: state.stats['total_cost'] += cost * rate,
-    где rate = currency.rates[currency] (RUB→1.0, USD→0.011111).
+    Исправление: state.stats['total_cost'] += cost * factor,
+    где factor = _to_base_factor(currency) — сколько RUB стоит 1 единица
+    валюты (RUB→1.0, USD→usd_rate, NONE→1.0).
     """
 
     def _reset_stats(self):
@@ -173,6 +181,8 @@ class TestBug2TotalCostConversion:
             "total_input": 0,
             "total_output": 0,
             "total_cost": 0.0,
+            "currency": router.cfg["currency"]["base"],
+            "usd_rate": _usd_rate(),
             "by_currency": {},
             "usd_equivalent": 0.0,
             "by_model": {},
@@ -183,7 +193,7 @@ class TestBug2TotalCostConversion:
         }
 
     def test_usd_total_cost_converted_to_rub(self):
-        """USD-модель: total_cost += cost * 0.011111, by_currency[USD] = cost (native)."""
+        """USD-модель: total_cost += cost * usd_rate (в RUB), by_currency[USD] = cost (native)."""
         router.state.available_models = {
             "test::usd-model": {
                 "id": "usd-model",
@@ -202,8 +212,10 @@ class TestBug2TotalCostConversion:
         # cost = (1M*2 + 0.5M*4) / 1M = 4.0 USD
         cost = 4.0
         assert router.state.stats["by_currency"].get("USD", 0) == pytest.approx(cost, rel=1e-6)
-        # total_cost = 4.0 * 0.011111 = 0.044444 RUB
-        assert router.state.stats["total_cost"] == pytest.approx(cost * 0.011111, rel=1e-6)
+        # total_cost = 4.0 * usd_rate = 360.0 RUB
+        assert router.state.stats["total_cost"] == pytest.approx(
+            cost * _usd_rate(), rel=1e-6
+        )
         # usd_equivalent = cost (USD не конвертируется)
         assert router.state.stats["usd_equivalent"] == pytest.approx(cost, rel=1e-6)
 
@@ -227,9 +239,11 @@ class TestBug2TotalCostConversion:
         # cost = (1M*10 + 0.5M*20) / 1M = 20.0 RUB
         cost = 20.0
         assert router.state.stats["by_currency"].get("RUB", 0) == pytest.approx(cost, rel=1e-6)
-        assert router.state.stats["total_cost"] == pytest.approx(cost, rel=1e-6)  # rate=1.0
-        # usd_equivalent = cost / 90.0
-        assert router.state.stats["usd_equivalent"] == pytest.approx(cost / 90.0, rel=1e-6)
+        assert router.state.stats["total_cost"] == pytest.approx(cost, rel=1e-6)  # factor=1.0
+        # usd_equivalent = cost / usd_rate
+        assert router.state.stats["usd_equivalent"] == pytest.approx(
+            cost / _usd_rate(), rel=1e-6
+        )
 
     def test_none_currency_zero_cost(self):
         """NONE-валюта (бесплатная): всё нулевое, by_currency['NONE'] == 0."""
@@ -255,7 +269,7 @@ class TestBug2TotalCostConversion:
     def test_mixed_currencies_total_cost(self):
         """
         Две модели в разных валютах: total_cost суммируется корректно
-        (RUB * 1.0 + USD * 0.011111), а by_currency раздельно.
+        (RUB * 1.0 + USD * usd_rate), а by_currency раздельно.
         """
         router.state.available_models = {
             "test::rub-m": {
@@ -281,8 +295,8 @@ class TestBug2TotalCostConversion:
         router.log_usage("test::rub-m", 1_000_000, 500_000)  # cost_rub = 20.0
         router.log_usage("test::usd-m", 1_000_000, 500_000)  # cost_usd = 4.0
 
-        # total_cost = 20.0 * 1.0 + 4.0 * 0.011111 = 20.044444
-        expected_total = 20.0 + 4.0 * 0.011111
+        # total_cost = 20.0 * 1.0 + 4.0 * usd_rate = 380.0 RUB
+        expected_total = 20.0 + 4.0 * _usd_rate()
         assert router.state.stats["total_cost"] == pytest.approx(expected_total, rel=1e-6)
         assert router.state.stats["by_currency"]["RUB"] == pytest.approx(20.0, rel=1e-6)
         assert router.state.stats["by_currency"]["USD"] == pytest.approx(4.0, rel=1e-6)
@@ -439,3 +453,131 @@ class TestBug4DoublePrefix:
             assert mid.count("::") == 1, (
                 f"ID содержит {mid.count('::')} :: (должен быть 1): {mid}"
             )
+
+
+# ============================================================
+# БАГ 5 — курс валюты был инвертирован
+# ============================================================
+
+
+class TestBug5InvertedCurrencyRate:
+    """
+    БАГ 5: курс валюты был инвертирован.
+
+    В config.yaml лежало rates: {USD: 0.011111} (= 1/90, «USD за 1 ₽»),
+    а код умножал native-стоимость на этот коэффициент. Для USD-моделей
+    total_cost занижался в 8100 раз (0.0000044 вместо 0.036 ₽).
+
+    Исправление: _to_base_factor(currency) — сколько RUB стоит 1 единица
+    валюты: RUB → 1.0, USD → usd_rate (90.0), NONE → 1.0.
+    """
+
+    def _reset_stats(self):
+        router.state.stats = {
+            "requests": 0,
+            "total_input": 0,
+            "total_output": 0,
+            "total_cost": 0.0,
+            "currency": router.cfg["currency"]["base"],
+            "usd_rate": _usd_rate(),
+            "by_currency": {},
+            "usd_equivalent": 0.0,
+            "by_model": {},
+            "routed_count": 0,
+            "not_routed_count": 0,
+            "fallback_count": 0,
+            "started_at": 0,
+        }
+
+    def _setup_usd_model(self):
+        router.state.available_models = {
+            "test::usd-model": {
+                "id": "usd-model",
+                "provider": "test",
+                "input_price_1m": 2.0,
+                "output_price_1m": 4.0,
+                "currency": "USD",
+                "price_source": "api",
+            },
+        }
+        router.state.models_by_provider = {"test": ["usd-model"]}
+
+    def _setup_rub_model(self):
+        router.state.available_models = {
+            "test::rub-model": {
+                "id": "rub-model",
+                "provider": "test",
+                "input_price_1m": 10.0,
+                "output_price_1m": 20.0,
+                "currency": "RUB",
+                "price_source": "api",
+            },
+        }
+        router.state.models_by_provider = {"test": ["rub-model"]}
+
+    def test_usd_total_cost_multiplies_by_usd_rate(self):
+        """USD: total_cost == by_currency['USD'] * usd_rate (а НЕ / usd_rate)."""
+        self._setup_usd_model()
+        self._reset_stats()
+
+        router.log_usage("test::usd-model", 1_000_000, 500_000)
+
+        # cost = (1M*2 + 0.5M*4) / 1M = 4.0 USD
+        usd_rate = _usd_rate()
+        stats = router.state.stats
+        native_usd = stats["by_currency"]["USD"]
+        assert native_usd == pytest.approx(4.0, rel=1e-6)
+
+        # Правильное направление: RUB за 1 USD
+        assert stats["total_cost"] == pytest.approx(native_usd * usd_rate, rel=1e-6)
+        # Инвертированный курс (1/90) дал бы 0.044444 — такого быть не должно
+        assert stats["total_cost"] != pytest.approx(native_usd / usd_rate)
+
+        # usd_equivalent для USD-модели == native-стоимость
+        assert stats["usd_equivalent"] == pytest.approx(native_usd, rel=1e-6)
+
+    def test_rub_total_cost_uses_factor_one(self):
+        """RUB: total_cost == by_currency['RUB'] (фактор 1.0)."""
+        self._setup_rub_model()
+        self._reset_stats()
+
+        router.log_usage("test::rub-model", 1_000_000, 500_000)
+
+        # cost = (1M*10 + 0.5M*20) / 1M = 20.0 RUB
+        usd_rate = _usd_rate()
+        stats = router.state.stats
+        native_rub = stats["by_currency"]["RUB"]
+        assert native_rub == pytest.approx(20.0, rel=1e-6)
+
+        assert stats["total_cost"] == pytest.approx(native_rub, rel=1e-6)
+        # usd_equivalent для RUB-модели == native / usd_rate
+        assert stats["usd_equivalent"] == pytest.approx(native_rub / usd_rate, rel=1e-6)
+
+    def test_total_cost_equals_usd_equivalent_times_usd_rate(self):
+        """Связка: total_cost (в базовой валюте) == usd_equivalent * usd_rate."""
+        self._setup_rub_model()
+        router.state.available_models["test::usd-model"] = {
+            "id": "usd-model",
+            "provider": "test",
+            "input_price_1m": 2.0,
+            "output_price_1m": 4.0,
+            "currency": "USD",
+            "price_source": "api",
+        }
+        router.state.models_by_provider = {"test": ["rub-model", "usd-model"]}
+        self._reset_stats()
+
+        router.log_usage("test::rub-model", 1_000_000, 500_000)  # 20.0 RUB
+        router.log_usage("test::usd-model", 1_000_000, 500_000)  # 4.0 USD
+
+        usd_rate = _usd_rate()
+        stats = router.state.stats
+
+        # total_cost = 20.0 + 4.0 * usd_rate = 380.0 RUB
+        assert stats["total_cost"] == pytest.approx(20.0 + 4.0 * usd_rate, rel=1e-6)
+        # usd_equivalent = 20.0 / usd_rate + 4.0
+        assert stats["usd_equivalent"] == pytest.approx(20.0 / usd_rate + 4.0, rel=1e-6)
+        # Связка между базовой суммой и USD-эквивалентом
+        assert stats["total_cost"] == pytest.approx(
+            stats["usd_equivalent"] * usd_rate, rel=1e-6
+        )

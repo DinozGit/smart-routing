@@ -496,7 +496,7 @@
                 </div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Total Cost</div>
+                <div class="stat-label" id="s-cost-label">Total Cost</div>
                 <div class="stat-value" id="s-cost">-</div>
             </div>
         </div>
@@ -1079,22 +1079,48 @@ Loading...</pre>
                 );
             }
 
+            // Символ валюты по её коду: RUB → ₽, USD → $, EUR → €, NONE → "".
+            // Для неизвестного кода возвращается сам код (" CODE "), чтобы сумму
+            // нельзя было спутать с другой валютой.
             function currencySymbol(code) {
-                if (code === "RUB") return "₽";
-                if (code === "USD") return "$";
-                return "—";
+                const map = { RUB: "₽", USD: "$", EUR: "€", NONE: "" };
+                const key = String(code || "RUB").toUpperCase();
+                if (Object.prototype.hasOwnProperty.call(map, key)) {
+                    return map[key];
+                }
+                return " " + key + " ";
+            }
+
+            // Подпись валюты для списков: символ, а если символа нет (NONE) — код.
+            function currencyLabel(code) {
+                const key = String(code || "RUB").toUpperCase();
+                const symbol = currencySymbol(key).trim();
+                return symbol || key;
+            }
+
+            // Сумма с символом валюты (символ перед суммой).
+            // Если символа нет (NONE) — только число.
+            function formatMoney(code, text) {
+                const symbol = currencySymbol(code).trim();
+                return symbol ? symbol + " " + text : text;
+            }
+
+            // Сумма с символом валюты (символ после суммы) — для таблицы моделей.
+            function formatMoneySuffix(code, text) {
+                const symbol = currencySymbol(code).trim();
+                return symbol ? text + " " + symbol : text;
             }
 
             function formatPrice(m) {
                 const inp = Number(m.input_price_1m || 0).toFixed(2);
                 const out = Number(m.output_price_1m || 0).toFixed(2);
-                return inp + " / " + out + " " + currencySymbol(m.currency);
+                return formatMoneySuffix(m.currency, inp + " / " + out);
             }
 
             function formatPriceCompact(m) {
                 const inp = Number(m.input_price_1m || 0).toFixed(2);
                 const out = Number(m.output_price_1m || 0).toFixed(2);
-                return inp + "/" + out + " " + currencySymbol(m.currency);
+                return formatMoneySuffix(m.currency, inp + "/" + out);
             }
 
             function formatContext(ctx) {
@@ -1472,8 +1498,8 @@ Loading...</pre>
                                         '<span class="model">$1</span>',
                                     )
                                     .replace(
-                                        /(\$\d+\.\d+)/g,
-                                        '<span class="cost">$1</span>',
+                                        /(\$\d+\.\d+)|(\bCost\s+\d+(?:\.\d+)?(?:\s+[A-Z]{2,4})?)/gi,
+                                        (m) => '<span class="cost">' + m + "</span>",
                                     );
                                 return (
                                     '<div class="log-entry"><span class="log-time">' +
@@ -1500,6 +1526,9 @@ Loading...</pre>
                 fetch("/stats")
                     .then((r) => r.json())
                     .then((s) => {
+                        // Базовая валюта из /stats (currency.base). Fallback — RUB.
+                        const base = String(s.currency || "RUB").toUpperCase();
+                        const cost = Number(s.total_cost || 0).toFixed(4);
                         document.getElementById("s-req").textContent =
                             s.requests || 0;
                         document.getElementById("s-routed").textContent =
@@ -1507,36 +1536,61 @@ Loading...</pre>
                         document.getElementById("s-notrouted").textContent =
                             s.not_routed_count || 0;
                         document.getElementById("s-cost").textContent =
-                            "$" + (s.total_cost || 0).toFixed(4);
+                            formatMoney(base, cost);
+                        document.getElementById("s-cost-label").textContent =
+                            "Total Cost (" + base + ")";
                         document.getElementById("sub").textContent =
                             "Requests: " +
                             (s.requests || 0) +
-                            " | Cost: $" +
-                            (s.total_cost || 0).toFixed(4);
-                        updateCurrencyStats(s);
+                            " | Cost: " +
+                            formatMoney(base, cost);
+                        updateCurrencyStats(s, base);
                     })
                     .catch(() => {});
             }
 
             /**
              * Разбивка затрат по валютам (D1).
-             * Источник — GET /stats: by_currency + usd_equivalent.
+             * Источник — GET /stats: by_currency (native-суммы) + usd_equivalent.
+             * Эквивалент пересчитывается в базовую валюту через usd_rate.
              */
-            function updateCurrencyStats(s) {
+            function updateCurrencyStats(s, base) {
                 const el = document.getElementById("s-currency");
                 if (!el) return;
+                const baseCode = String(base || "RUB").toUpperCase();
                 const byCurrency = s.by_currency || {};
                 const usdEq = Number(s.usd_equivalent || 0);
-                const parts = Object.keys(byCurrency).map(
-                    (cur) =>
-                        `${cur} ${Number(byCurrency[cur]).toFixed(2)}`,
-                );
-                if (!parts.length && !usdEq) {
-                    el.textContent = "Cost by currency: нет данных";
+                const usdRate = Number(s.usd_rate || 90.0);
+                const entries = Object.keys(byCurrency).map((cur) => ({
+                    code: String(cur).toUpperCase(),
+                    amount: Number(byCurrency[cur] || 0),
+                }));
+                if (!entries.length && !usdEq) {
+                    el.textContent =
+                        "Cost by currency: нет данных (это нормально до первого запроса)";
                     return;
                 }
-                if (usdEq) {
-                    parts.push(`≈ $${usdEq.toFixed(2)} USD-equiv`);
+                const parts = entries.map(
+                    (e) => currencyLabel(e.code) + " " + e.amount.toFixed(2),
+                );
+                // Эквивалент в базовой валюте: usd_rate — курс к базовой валюте
+                // (для базы RUB это 90 RUB за 1 USD), для USD-базы — 1:1.
+                const baseEquiv = baseCode === "USD" ? usdEq : usdEq * usdRate;
+                // Показываем эквивалент, только если он несёт новую информацию
+                // (иначе он просто дублирует единственную native-сумму).
+                const onlyNative =
+                    entries.length === 1 && entries[0].code === baseCode;
+                const differs =
+                    !onlyNative ||
+                    Math.abs(baseEquiv - entries[0].amount) > 0.01;
+                if (usdEq && differs) {
+                    parts.push(
+                        "≈ " +
+                            formatMoney(baseCode, baseEquiv.toFixed(2)) +
+                            " (" +
+                            baseCode +
+                            ")",
+                    );
                 }
                 el.textContent = "Cost by currency: " + parts.join(" · ");
             }

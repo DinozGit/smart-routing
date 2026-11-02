@@ -549,7 +549,7 @@ def sample_coordinator_prompt():
 
 @pytest.fixture
 def sample_bot_prompt():
-    return "You are CalorIt Telegram Bot with aiogram handlers, FSM states, inline keyboards."
+    return "You are a Telegram Bot with aiogram handlers, FSM states, inline keyboards."
 ```
 
 ### 🔄 Цикл разработки с тестами

@@ -219,7 +219,28 @@ class TestUsdEquivalent:
             }
             r.state.models_by_provider = {"routerai": ["rub-model"]}
             r.log_usage("rub-model", 1000, 500)
-            # cost = 0.02 RUB, usd_rate = 90.0
-            assert r.state.stats["usd_equivalent"] == 0.02 / 90.0
+            # cost = 0.02 RUB, usd_equivalent = cost / usd_rate
+            usd_rate = float(r.cfg["currency"]["usd_rate"])
+            assert r.state.stats["usd_equivalent"] == 0.02 / usd_rate
         finally:
             r.state.stats = orig
+
+
+class TestToBaseFactor:
+    """_to_base_factor: сколько единиц базовой валюты (RUB) стоит 1 единица валюты."""
+
+    def test_rub_factor_is_one(self):
+        """RUB (базовая) → 1.0."""
+        assert router._to_base_factor("RUB") == 1.0
+
+    def test_usd_factor_is_usd_rate(self):
+        """USD → usd_rate (сколько RUB за 1 USD), а НЕ 1/usd_rate."""
+        usd_rate = float(router.cfg["currency"]["usd_rate"])
+        assert router._to_base_factor("USD") == pytest.approx(usd_rate)
+        # На инвертированном курсе было бы 1/usd_rate
+        assert router._to_base_factor("USD") != pytest.approx(1.0 / usd_rate)
+
+    def test_none_factor_is_one(self):
+        """NONE (бесплатные модели) → 1.0."""
+        assert router._to_base_factor("NONE") == 1.0
+
