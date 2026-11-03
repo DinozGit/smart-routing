@@ -1228,12 +1228,17 @@ Loading...</pre>
                     : disp;
             }
 
+            /**
+             * Подпись модели в табличном месте (маппинг агентов):
+             * тот же составной ключ "provider::model_id", что в опциях
+             * селектов и в routing.json — единый стиль, провайдер не
+             * теряется. Голые model_id из старых конфигов приводятся
+             * через toCompositeSpec (как это делает селект).
+             */
             function prettyModel(value) {
-                return String(value || "")
-                    .replace(/^[^:]*::/, "")
-                    .replace("deepseek/", "")
-                    .replace("qwen/", "")
-                    .replace("z-ai/", "");
+                const raw = String(value || "");
+                if (!raw) return "";
+                return toCompositeSpec(raw);
             }
 
             // ========== Tab switching ==========
@@ -1269,7 +1274,9 @@ Loading...</pre>
                     const resp = await fetch("/roles");
                     const data = await resp.json();
                     rolesConfig = data.roles || {};
-                    // Показываем fallback-модели
+                    // Показываем fallback-модели: составной ключ как есть
+                    // ("provider::model_id") — тот же стиль, что в опциях
+                    // селектов, без отрезания вендорных namespace'ов.
                     const fbCoord =
                         rolesConfig["coordinator"]?.fallback_model || "—";
                     const fbWorker =
@@ -1278,21 +1285,12 @@ Loading...</pre>
                         rolesConfig["worker_img"]?.fallback_model || "—";
                     document.getElementById(
                         "fallback-coordinator",
-                    ).textContent = fbCoord
-                        .replace("deepseek/", "")
-                        .replace("qwen/", "")
-                        .replace("z-ai/", "");
+                    ).textContent = fbCoord;
                     document.getElementById(
                         "fallback-worker-default",
-                    ).textContent = fbWorker
-                        .replace("deepseek/", "")
-                        .replace("qwen/", "")
-                        .replace("z-ai/", "");
+                    ).textContent = fbWorker;
                     document.getElementById("fallback-worker-img").textContent =
-                        fbImg
-                            .replace("deepseek/", "")
-                            .replace("qwen/", "")
-                            .replace("z-ai/", "");
+                        fbImg;
                     // Worker Img select — по умолчанию из роли
                     setSelectValue(
                         "model-worker-img",
@@ -1383,6 +1381,10 @@ Loading...</pre>
             /**
              * <option> для селектов моделей: группы по провайдерам.
              * Значение — составной ключ "provider::model_id" (Phase 2).
+             * Текст опции показывает тот же составной ключ, что и value:
+             * одна и та же модель у разных провайдеров стоит по-разному,
+             * поэтому провайдер виден в каждой строке, а не только в заголовке
+             * optgroup (заголовок группы не виден в закрытом селекте).
              */
             function getModelOptionsHtml() {
                 let html = '<option value="auto">auto (по роли агента)</option>';
@@ -1397,7 +1399,7 @@ Loading...</pre>
                             const spec = `${name}${MODEL_SEPARATOR}${m.id}`;
                             const vision =
                                 m.supports_images === true ? " 🖼" : "";
-                            const text = `${m.id} — ${formatPriceCompact(m)}${vision}`;
+                            const text = `${spec} — ${formatPriceCompact(m)}${vision}`;
                             return `<option value="${escapeHtml(spec)}">${escapeHtml(
                                 text,
                             )}</option>`;
