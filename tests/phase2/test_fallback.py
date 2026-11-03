@@ -19,6 +19,12 @@ import router
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
+@pytest.fixture(autouse=True)
+def fake_api_key(monkeypatch):
+    """Подменяет ROUTERAI_KEY, чтобы не было 502 «Missing API key»."""
+    monkeypatch.setenv("ROUTERAI_KEY", "fake-test-key-123")
+
+
 class TestFallbackChain:
     """Non-streaming fallback chain: primary 5xx → fallback model."""
 

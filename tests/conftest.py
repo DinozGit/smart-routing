@@ -15,6 +15,22 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 @pytest.fixture(autouse=True, scope="function")
+def isolate_api_keys(monkeypatch):
+    """
+    Убирает из окружения API-ключи провайдеров.
+
+    Нужно, чтобы тесты не зависели от локального `.env` разработчика:
+    `router.py` вызывает `load_dotenv()` на импорте, поэтому реальный ключ
+    попадает в `os.environ` и прокси перестаёт отвечать 502 «Missing API key».
+    В CI `.env` нет, и без этой фикстуры часть тестов падала бы.
+
+    Тесты, которым нужен ключ, подставляют его сами через `monkeypatch.setenv`.
+    """
+    for env_name in ("ROUTERAI_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(env_name, raising=False)
+
+
+@pytest.fixture(autouse=True, scope="function")
 def fresh_http_client():
     """
     Пересоздаёт глобальный httpx.AsyncClient перед каждым тестом.
