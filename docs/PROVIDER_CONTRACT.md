@@ -487,3 +487,351 @@ state.stats = {
 | Coordinator | `docs/`, `README.md`, `SECURITY.md` | ревью + доки |
 
 **Никто не трогает чужие файлы.**
+
+---
+
+# 📐 Контракт спринта «Багфиксинг F1–F7» (2026-11)
+
+> **Этот раздел — нормативный.** Все агенты спринта реализуют **ровно** эти
+> форматы, имена полей и семантику. Не отклоняться без согласования с
+> координатором: агенты работают параллельно, write scope не пересекается,
+> но API/UI/тесты должны сходиться в точке.
+>
+> **Контекст.** Жалоба пользователя: «откуда-то подтягивается ключ openrouter
+> и туда стучится… даже после удаления по логам видно что он туда ломится».
+> Разбор показал 5 механизмов (см. `docs/ROADMAP.md`, спринт «Багфиксинг F1–F7»).
+> Ключевое: **реальных ключей в репозитории нет** (в истории git только
+> плейсхолдеры) — проблема в том, что SmartRouter **сам, неявно**, выбирает
+> OpenRouter, и при этом **не даёт ключ отозвать**.
+
+---
+
+## F1. `allow_cross_provider_bare_id` — запрет неявного кросс-провайдерного резолва
+
+### Проблема
+
+`resolve_model_spec(spec)` для **голого** `model_id` (без `provider::`) ищет
+модель по каталогу **всех** провайдеров. В каталоге 73 модели, которые есть
+**только** у `openrouter`; 11 из них содержат `flash` или `qwen` и попадают в
+эвристику `router.py:1049` → `_normalize_to_composite()` → `resolve_model_spec()`
+→ уникальный кандидат `openrouter` → запрос уходит на OpenRouter **с ключом
+пользователя**, который OpenRouter не выбирал.
+
+### Контракт
+
+**Где живёт флаг:** `routing.json` (runtime-конфиг, hot-reload через `POST /config`).
+
+```json
+{
+  "allow_cross_provider_bare_id": false
+}
+```
+
+- **Значение по умолчанию — `false`** (fail-closed). Если ключа нет в
+  `routing.json` → `false`. Действует **только** при отсутствии ключа явно.
+- Читается **на каждый вызов** из `state.config` (не кэшируется) → переключается
+  без перезапуска роутера.
+- `true` → старое поведение (поиск по всем провайдерам) — для тех, кому нужен
+  кросс-провайдерный подбор по голому ID.
+
+### Новая семантика `resolve_model_spec(spec, source)`
+
+Сигнатура меняется:
+
+```python
+def resolve_model_spec(spec: str, source: str = "client") -> tuple[str, str]:
+```
+
+`source` — контекст вызова:
+
+| `source` | Кто вызывает | Семантика для голого ID |
+|---|---|---|
+| `"client"` | запрос от IDE/клиента (`proxy()`, `smart_route_model()` для клиентской модели) | **не пересекает провайдеров**: ищется **только** в каталоге `default_provider`; не найдено → `default_provider` |
+| `"config"` | операторский конфиг: `roles.*.default_model` в `config.yaml`, `role_models`/`role_fallbacks`/`agent_to_worker_mapping` в `routing.json` | поиск по каталогу всех провайдеров (текущее поведение) — оператор явно выбрал модель |
+
+> **Важно:** для `source="config"` поведение **не меняется**. Это защищает
+> существующие инсталляции, где роль настроена на модель, доступную только у
+> другого провайдера.
+
+**Алгоритм для `source="client"`, голый ID:**
+
+1. Если `allow_cross_provider_bare_id` == `true` → текущий алгоритм (поиск по
+   всем провайдерам; единственный кандидат → он; несколько → `default_provider`
+   + WARNING; ноль → `default_provider` + WARNING).
+2. Иначе (`false`):
+   - если ID есть в каталоге `default_provider` → `default_provider`;
+   - если ID есть **только** у другого провайдера → `default_provider`
+     + **INFO-лог** (см. F5);
+   - если ID не найден нигде → `default_provider` + WARNING (как сейчас).
+
+**Явная спецификация `provider::model` не меняется** — это точное указание
+пользователя, оно всегда уважается (кроме правила F2 про `enabled`).
+
+### `_normalize_to_composite`
+
+```python
+def _normalize_to_composite(model_id: str, source: str = "client") -> str:
+```
+
+- `source` пробрасывается в `resolve_model_spec`.
+- **Критично:** вызовы с конфигом ролей (`config.yaml: roles.*.default_model`,
+  `routing.json: role_models`) → `source="config"`.
+- Вызов с **клиентским** `requested_model` (`router.py:1049`) → `source="client"`.
+
+### Куда какой `source` передавать (обязательно к следованию)
+
+| Место | `source` |
+|---|---|
+| `router.py:1050` — `_normalize_to_composite(requested_model)` (клиент без `::`) | `"client"` |
+| `router.py:1060`, `1120`, `1129` — `_normalize_to_composite(coord_model)` (роль) | `"config"` |
+| `router.py:1093`, `1102` — `_normalize_to_composite(model)` (agent mapping / роль) | `"config"` |
+| `router.py:1653` — `resolve_model_spec(spec)` в `proxy()` | `"client"` |
+| `router.py:1826` — `resolve_model_spec(chain_spec)` (цепочка fallback) | `"config"` |
+
+---
+
+## F2. `enabled` — провайдер можно выключить
+
+### Где живёт флаг
+
+`config.yaml` → `providers.<name>.enabled` (bool).
+
+```yaml
+providers:
+  routerai:
+    enabled: true
+  openrouter:
+    enabled: false     # ← провайдер выключен
+  ollama:
+    enabled: true
+```
+
+- **Значение по умолчанию — `true`** (BC: у провайдера без поля `enabled`
+  провайдер считается включённым). Так старые `config.yaml` продолжают работать.
+- `state.providers` — живой dict (`router.py:203`), поэтому переключение
+  через админку применяется **сразу, без перезапуска**.
+- `default_provider` **нельзя выключить** — попытка → `HTTP 400`.
+
+### Что делает `enabled: false`
+
+| Место | Поведение |
+|---|---|
+| `_sync_all_providers()` | провайдер **пропускается**, в `results` — запись `{"status": "skipped", "reason": "disabled"}`, **не** `"error"` |
+| `POST /models/sync` (без `provider`) | пропускается, как выше |
+| `POST /models/sync {"provider": "X"}` для выключенного | `HTTP 409`, detail `"Provider 'X' is disabled"` |
+| `GET /v1/models` | модели выключенного провайдера **не выдаются** |
+| `GET /models/available` | провайдер присутствует в ответе, но `"enabled": false` и `"models": []` |
+| Fallback-цепочка | запись цепочки, чей провайдер выключен → **пропускается** (как «no key»), с логом `⚠️ Fallback skip (provider disabled)` |
+| Явный запрос `disabled::model` | `HTTP 400`, detail `"Provider 'X' is disabled"` |
+| `GET /providers` | в ответе **обязательно** поле `"enabled": bool` |
+
+> **Почему не просто «удалить провайдера»:** удаление стирает `base_url`,
+> `api_key_env`, `pricing_mode` и настройки SSL — восстановить их потом можно
+> только вручную. `enabled: false` — обратимый выключатель.
+
+### Запись флага через API
+
+`POST /providers` принимает новое поле:
+
+```json
+{ "name": "openrouter", "enabled": false, ... }
+```
+
+- Значение `enabled` **обязательно** присутствует в ответе `POST /providers`
+  (по умолчанию `true`).
+- `POST /providers` сохраняет `enabled` в `config.yaml` через существующий
+  `save_config_yaml()`.
+
+---
+
+## F3. `DELETE /providers/{name}/key` — отзыв ключа
+
+### Проблема
+
+Сейчас ключ можно **только записать** (`POST /providers` → `set_env_key`).
+Удаления ключа нет вообще. А удаление строки из `.env` **не действует на
+запущенный процесс**: `load_dotenv()` при импорте (`router.py:28`) вызывается
+**без** `override=True`, поэтому (а) переменная окружения **побеждает** файл
+`.env`, и (б) уже загруженный ключ остаётся в `os.environ` до перезапуска.
+
+### Контракт
+
+**Эндпоинт:**
+
+```
+DELETE /providers/{name}/key
+```
+
+**Ответ `200`:**
+
+```json
+{
+  "status": "ok",
+  "provider": "openrouter",
+  "api_key_env": "OPENROUTER_API_KEY",
+  "key_removed": true,
+  "env_cleared": true
+}
+```
+
+- `key_removed` — `true`, если строка была удалена из `.env`; `false`, если её
+  там не было (но `env_cleared` всё равно может быть `true`).
+- `env_cleared` — `true`, если переменная была удалена из `os.environ` **текущего
+  процесса**.
+
+**Поведение:**
+
+1. Удаляет строку `KEY=` из файла `.env` (атомарная запись, существующий
+   `_atomic_write`). Если `.env` не существует — `key_removed: false`.
+2. **`os.environ.pop(api_key_env, None)`** — ключ исчезает из текущего процесса
+   **без перезапуска**.
+3. `GET /providers` после удаления → `has_api_key: false`, `api_key_masked`
+   отсутствует.
+4. Если `api_key_env` пустой (провайдер без ключа, например Ollama) →
+   `HTTP 400`, detail `"Provider 'X' does not use an API key"`.
+5. Если провайдер не найден → `HTTP 404`.
+6. Удаление ключа **не трогает** провайдера, его `base_url` и прочее.
+
+> **Важно:** после `os.environ.pop()` переменная окружения может вернуться при
+> перезапуске процесса, если она экспортирована в системе/профиле. Это
+> ожидаемо и не чинится роутером.
+
+---
+
+## F4. Sync-all — только включённые провайдеры
+
+- `_sync_all_providers()` (`router.py:630`) обходит **только** провайдеров с
+  `enabled != false`.
+- Для выключенного провайдера в `results`:
+  ```json
+  "openrouter": {"status": "skipped", "reason": "disabled", "synced": 0, "last_sync": null}
+  ```
+- Лог — **INFO**, не ERROR: `⏭️ Провайдер 'openrouter' выключен — синк пропущен`.
+- Итоговый `status` ответа `/models/sync` — `"ok"` (ошибок нет, есть пропуск).
+- `GET /models/available?refresh=true` использует тот же `_sync_all_providers()`
+  → выключенные провайдеры не опрашиваются.
+
+---
+
+## F5. Лог выбора провайдера
+
+Цель — чтобы в логах было видно, **почему** запрос ушёл в конкретного
+провайдера. Обязательные сообщения (уровень **INFO**):
+
+| Ситуация | Сообщение |
+|---|---|
+| Голый ID ушёл в `default_provider` при `allow_cross_provider_bare_id=false` | `🔒 Голый ID '{model}' доступен только у провайдеров {candidates} — используется default '{default_provider}' (routing.allow_cross_provider_bare_id=false)` |
+| Голый ID однозначно найден в каталоге | `📍 Модель '{model}' → провайдер '{provider}' (источник: каталог)` |
+| Явный `provider::model` | `📍 Модель '{model}' → провайдер '{provider}' (источник: явное указание)` |
+
+- Сообщения пишутся **один раз на запрос**, а не на каждый внутренний вызов
+  (иначе INFO-лог засорится).
+- Уровень логирования — `INFO` (совпадает с `logging.level` из `config.yaml`).
+
+---
+
+## F6. UI админки (`admin.html`)
+
+### Вкладка «🔌 Providers» — таблица провайдеров
+
+Добавить **колонку «Enabled»** с тумблером (checkbox) у каждого провайдера:
+
+| Провайдер | Enabled | Ключ | Действия |
+|---|---|---|---|
+| RouterAI | ☑ | `sk-IbE****3f2a` | Edit · Delete · **Remove key** |
+| OpenRouter | ☐ | — | Edit · Delete · **Remove key** |
+
+### Требования к UI
+
+1. **Тумблер Enabled** → `POST /providers` с полным набором полей провайдера +
+   `"enabled": <bool>`. После ответа — перерисовка списка.
+2. **Кнопка «Remove key»** → `DELETE /providers/{name}/key` + подтверждение.
+   После ответа — обновить колонку «Ключ».
+3. **Бейдж статуса ключа**: `has_api_key === true` → маска; `false` → «нет ключа».
+4. **Предупреждение** (визуальное, без модалок), если провайдер `enabled` и у него
+   `has_api_key === false` → текст вида:
+   `⚠️ Включён, но без ключа — запросы к нему будут падать с 502`.
+5. Выключенный провайдер — визуально приглушён (например, `opacity: 0.5`),
+   его модели **не** показываются в списке моделей (`GET /models/available`
+   отдаёт для него `"models": []`).
+6. Все строки, вставляемые в DOM через `innerHTML`, экранируются существующей
+   функцией `escapeHtml()`.
+
+### Вкладка «📦 Models»
+
+- В выпадающих списках выбора модели (`<optgroup>`) **не должно** быть моделей
+  выключенных провайдеров (данные приходят из `/models/available` — достаточно
+  отфильтровать по `providers[p].enabled === false`).
+
+### Новый эндпоинт — только `api`
+
+UI **не** реализует собственную логику удаления ключа — только вызывает
+`DELETE /providers/{name}/key`.
+
+---
+
+## F7. Тесты (`tests/phase6/`)
+
+Новая директория `tests/phase6/` + свой `conftest.py` (по образцу
+`tests/phase5/`). Тесты **не ходят в сеть** — HTTP-клиент мокается.
+
+### Обязательный список
+
+| # | Тест | Что проверяет |
+|---|---|---|
+| 1 | `test_bare_id_stays_in_default_provider` | Голый ID, есть только в каталоге `openrouter` → `resolve_model_spec(id, "client")` → `default_provider`; **не** `openrouter` |
+| 2 | `test_bare_id_flag_enables_cross_provider` | С `allow_cross_provider_bare_id=true` → возвращается `openrouter` (старое поведение) |
+| 3 | `test_config_source_keeps_old_behaviour` | `resolve_model_spec(id, "config")` → `openrouter` (операторский конфиг не ломаем) |
+| 4 | `test_explicit_spec_unaffected` | `openrouter::model` → `openrouter` при любом флаге |
+| 5 | `test_disabled_provider_not_in_v1_models` | `GET /v1/models` не содержит моделей выключенного провайдера |
+| 6 | `test_disabled_provider_skipped_in_sync_all` | Sync-all → в `results` провайдера `status == "skipped"`, сети не было |
+| 7 | `test_sync_disabled_provider_returns_409` | `POST /models/sync {"provider": "openrouter"}` для выключенного → 409 |
+| 8 | `test_disabled_provider_explicit_request_400` | Запрос `disabled::model` → 400 |
+| 9 | `test_disabled_provider_skipped_in_fallback` | Fallback-цепочка на выключенного провайдера → запись пропущена |
+| 10 | `test_delete_key_clears_env` | `DELETE /providers/{name}/key` → `os.environ` **не** содержит переменную; `has_api_key == false` |
+| 11 | `test_delete_key_removes_line_from_env_file` | Строка `KEY=` удалена из `.env` (tmp-файл) |
+| 12 | `test_delete_key_unknown_provider_404` | → 404 |
+| 13 | `test_providers_response_has_enabled` | `GET /providers` → у каждого провайдера поле `enabled: bool` |
+| 14 | `test_default_provider_cannot_be_disabled` | Попытка выключить `default_provider` → 400 |
+| 15 | `test_log_records_provider_choice` | При `allow_cross_provider_bare_id=false` в логе есть сообщение про блокировку (F5) |
+
+### Правила
+
+- Изоляция состояния: `state.config`, `state.providers`, `state.available_models`,
+  `state.models_by_provider` — **сбрасывать и восстанавливать** (см. `tests/conftest.py`).
+- `routing.json` и `config.yaml` в тестах **не трогаются** — `conftest.py`
+  подменяет `state.config_file` на tmp-путь.
+- Тесты F7 не должны ломать существующие 257 тестов (`pytest tests/ -q` → все зелёные).
+
+---
+
+## F8. Матрица write scope спринта
+
+| Агент | Write scope | Задачи |
+|---|---|---|
+| `api` | `router.py` | F1, F2 (серверная часть), F3 (эндпоинт), F4, F5 |
+| `frontend` | `admin.html` | F6 (UI), F3 (кнопка «Remove key») |
+| `devops` | `config.yaml` | F2 (`enabled: true` всем трём провайдерам) |
+| `tests` | `tests/phase6/` | F7 |
+| `coordinator` | `docs/`, `README.md`, `SECURITY.md` | контракт, ревью, доки |
+
+**Запрещено:** трогать чужие файлы. `api` не правит `admin.html`, `frontend`
+не правит `router.py`, `tests` не правит `config.yaml`.
+
+**Порядок:** `api` и `frontend` могут стартовать **параллельно** (write scope не
+пересекаются), но `frontend` должен опираться на этот контракт, а не на
+реализацию `api`. `tests` стартует **после** того, как `api` закончит F1–F5
+(иначе тесты придётся переписывать).
+
+---
+
+## F9. Обратная совместимость
+
+| Что | Правило |
+|---|---|
+| `config.yaml` без `enabled` | провайдер считается включённым |
+| `routing.json` без `allow_cross_provider_bare_id` | `false` (fail-closed) |
+| `POST /providers` без `enabled` | `enabled: true` |
+| `GET /providers` | **добавляется** поле `enabled` (не ломает UI — лишнее поле игнорируется) |
+| Существующие 257 тестов | должны остаться зелёными; если тест падает из-за нового поведения F1 — тест правится **только** с обоснованием в комментарии |
+| Каталог моделей | формат `models_cache.json` **не меняется** |

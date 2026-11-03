@@ -43,6 +43,7 @@ models:
 
 providers:
   routerai:
+    enabled: true
     display_name: RouterAI
     base_url: https://routerai.ru/api/v1/chat/completions
     models_endpoint: https://routerai.ru/api/v1/models
@@ -54,6 +55,7 @@ providers:
     ca_bundle: ""
     extra_headers: {}
   openrouter:
+    enabled: true
     display_name: OpenRouter
     base_url: https://openrouter.ai/api/v1/chat/completions
     models_endpoint: https://openrouter.ai/api/v1/models
@@ -67,6 +69,7 @@ providers:
       HTTP-Referer: https://github.com/DinozGit/smart-routing
       X-Title: SmartRouter
   ollama:
+    enabled: true
     display_name: Ollama (local)
     base_url: http://localhost:11434/v1/chat/completions
     models_endpoint: http://localhost:11434/api/tags

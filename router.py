@@ -220,6 +220,11 @@ class RouterState:
         first = next(iter(self.providers.keys()), "routerai")
         return first
 
+    def is_provider_enabled(self, provider_name: str) -> bool:
+        """Проверяет, включён ли провайдер (по умолчанию True)."""
+        p_cfg = self.providers.get(provider_name, {})
+        return p_cfg.get("enabled", True)
+
     def get_provider_url(self, provider_name: str) -> str:
         """Возвращает base_url провайдера."""
         provider = self.providers.get(provider_name, {})
@@ -628,11 +633,20 @@ class RouterState:
             }
 
     async def _sync_all_providers(self) -> dict:
-        """Синк всех провайдеров, каждый в своём try/except."""
+        """Синк всех включённых провайдеров, каждый в своём try/except."""
         results = {}
         total_synced = 0
         max_sync = 0
         for p_name in self.providers:
+            if not self.is_provider_enabled(p_name):
+                logger.info(
+                    f"\u23ed\ufe0f Провайдер '{p_name}' выключен \u2014 синк пропущен"
+                )
+                results[p_name] = {
+                    "status": "skipped", "reason": "disabled",
+                    "synced": 0, "last_sync": None
+                }
+                continue
             try:
                 result = await self.sync_models_from_provider(p_name)
                 results[p_name] = result.get("results", {}).get(p_name, result)
@@ -973,13 +987,17 @@ def log_usage(model: str, input_tokens: int, output_tokens: int):
 # ============================================================
 
 
-def resolve_model_spec(spec: str) -> tuple[str, str]:
+def resolve_model_spec(spec: str, source: str = "client") -> tuple[str, str]:
     """
     Разбирает спецификацию модели и возвращает (provider, model_id).
 
     spec может быть:
     - "provider::model_id" — составной ключ
     - "model_id" — голый ID, ищется в каталоге
+
+    source — контекст вызова:
+    - "client": голый ID не пересекает провайдеров (ищется только в default_provider)
+    - "config": поиск по всем провайдерам (операторский конфиг)
 
     Если провайдер не указан или не найден — используется default_provider.
     """
@@ -993,6 +1011,10 @@ def resolve_model_spec(spec: str) -> tuple[str, str]:
                 f"'{spec}', используется default '{state.default_provider}'"
             )
             return state.default_provider, model_id
+        # F5: явное указание провайдера
+        logger.info(
+            f"\U0001f4cd Модель '{model_id}' \u2192 провайдер '{prov}' (источник: явное указание)"
+        )
         return prov, model_id
 
     # Голый model_id — поиск в каталоге
@@ -1000,6 +1022,63 @@ def resolve_model_spec(spec: str) -> tuple[str, str]:
         # Каталог ещё не загружен
         return state.default_provider, spec
 
+    if source == "client":
+        allow_cross = state.config.get("allow_cross_provider_bare_id", False)
+        if not allow_cross:
+            # Ищем только в каталоге default_provider
+            default_provider = state.default_provider
+            default_ids = state.models_by_provider.get(default_provider, [])
+            if spec in default_ids:
+                # F5: найден в каталоге default_provider
+                logger.info(
+                    f"\U0001f4cd Модель '{spec}' \u2192 провайдер '{default_provider}' (источник: каталог)"
+                )
+                return default_provider, spec
+
+            # Ищем у других провайдеров
+            candidates = []
+            for prov, ids in state.models_by_provider.items():
+                if prov != default_provider and spec in ids:
+                    candidates.append(prov)
+
+            if candidates:
+                # F5: голый ID доступен только у других провайдеров
+                logger.info(
+                    f"\U0001f512 Голый ID '{spec}' доступен только у провайдеров {candidates} "
+                    f"\u2014 используется default '{default_provider}' "
+                    f"(routing.allow_cross_provider_bare_id=false)"
+                )
+            else:
+                logger.warning(
+                    f"\u26a0\ufe0f Модель '{spec}' не найдена в каталоге, "
+                    f"используется default '{default_provider}'"
+                )
+            return default_provider, spec
+
+        # allow_cross_provider_bare_id == true: старое поведение (поиск по всем)
+        candidates = []
+        for prov, ids in state.models_by_provider.items():
+            if spec in ids:
+                candidates.append(prov)
+
+        if len(candidates) == 1:
+            logger.info(
+                f"\U0001f4cd Модель '{spec}' \u2192 провайдер '{candidates[0]}' (источник: каталог)"
+            )
+            return candidates[0], spec
+        elif len(candidates) > 1:
+            logger.warning(
+                f"\u26a0\ufe0f Модель '{spec}' у нескольких провайдеров: {candidates}, "
+                f"используется default '{state.default_provider}'"
+            )
+        else:
+            logger.warning(
+                f"\u26a0\ufe0f Модель '{spec}' не найдена в каталоге, "
+                f"используется default '{state.default_provider}'"
+            )
+        return state.default_provider, spec
+
+    # source == "config": старое поведение (поиск по всем провайдерам)
     candidates = []
     for prov, ids in state.models_by_provider.items():
         if spec in ids:
@@ -1020,11 +1099,11 @@ def resolve_model_spec(spec: str) -> tuple[str, str]:
     return state.default_provider, spec
 
 
-def _normalize_to_composite(model_id: str) -> str:
+def _normalize_to_composite(model_id: str, source: str = "client") -> str:
     """Нормализует model_id в составную спецификацию provider::model_id."""
     if "::" in model_id:
         return model_id
-    provider, _ = resolve_model_spec(model_id)
+    provider, _ = resolve_model_spec(model_id, source=source)
     return f"{provider}::{model_id}"
 
 
@@ -1047,7 +1126,7 @@ def smart_route_model(
 
     # 1. Явная модель — если уже содержит flash или qwen, резолвим в составной вид
     if any(m in requested_model.lower() for m in ["flash", "qwen"]):
-        spec = _normalize_to_composite(requested_model)
+        spec = _normalize_to_composite(requested_model, source="client")
         return spec, "", "Без изменений (уже дешевая)"
 
     messages = body.get("messages", [])
@@ -1057,7 +1136,7 @@ def smart_route_model(
             or get_role_default_model("coordinator")
             or requested_model
         )
-        spec = _normalize_to_composite(coord_model)
+        spec = _normalize_to_composite(coord_model, source="config")
         return spec, "coordinator", "Нет сообщений -> coordinator"
 
     # Ищем системный промпт и последнее сообщение пользователя
@@ -1090,7 +1169,7 @@ def smart_route_model(
         model = mapping.get(agent)
         if model and model != "auto":
             role = get_role_for_agent(agent) or ""
-            spec = _normalize_to_composite(model)
+            spec = _normalize_to_composite(model, source="config")
             return (spec, role, f"{mech}: {agent}")
         role = get_role_for_agent(agent)
         if role:
@@ -1098,7 +1177,7 @@ def smart_route_model(
                 role
             ) or get_role_default_model(role)
             if model:
-                spec = _normalize_to_composite(model)
+                spec = _normalize_to_composite(model, source="config")
                 return (spec, role, f"{mech}: {agent} (auto -> {role} default)")
         return None
 
@@ -1292,6 +1371,9 @@ async def list_models():
     for m in state.get_all_available_models():
         mid = m["id"]
         prov = m.get("provider", state.default_provider)
+        # F2: исключаем модели выключенных провайдеров
+        if not state.is_provider_enabled(prov):
+            continue
         composite_id = f"{prov}::{mid}"
         if composite_id not in seen:
             models_list.append(
@@ -1317,12 +1399,17 @@ async def get_available_models(refresh: bool = Query(False)):
     # Группировка по провайдерам
     providers_dict = {}
     for p_name, model_ids in state.models_by_provider.items():
-        models_list = []
-        for mid in model_ids:
-            key = f"{p_name}::{mid}"
-            if key in state.available_models:
-                models_list.append(state.available_models[key])
+        enabled = state.is_provider_enabled(p_name)
+        if enabled:
+            models_list = []
+            for mid in model_ids:
+                key = f"{p_name}::{mid}"
+                if key in state.available_models:
+                    models_list.append(state.available_models[key])
+        else:
+            models_list = []
         providers_dict[p_name] = {
+            "enabled": enabled,
             "last_sync": state.provider_last_sync.get(p_name),
             "count": len(models_list),
             "models": models_list,
@@ -1352,6 +1439,14 @@ async def sync_models(request: Request):
         pass
 
     provider = body.get("provider") if isinstance(body, dict) else None
+
+    # F2: проверка enabled для конкретного провайдера
+    if provider and provider in state.providers:
+        if not state.is_provider_enabled(provider):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Provider '{provider}' is disabled"
+            )
 
     try:
         result = await state.sync_models_from_provider(provider)
@@ -1506,6 +1601,8 @@ async def get_providers():
     result = {}
     for name, p in state.providers.items():
         result[name] = {k: v for k, v in p.items() if k != "api_key"}
+        # F2: добавляем enabled (по умолчанию true)
+        result[name]["enabled"] = p.get("enabled", True)
         # Показываем только маску ключа (первые 4 + последние 4 символа)
         key_env = p.get("api_key_env", "")
         api_key = os.getenv(key_env, "")
@@ -1541,6 +1638,7 @@ async def add_provider(request: Request):
         "base_url": data.get("base_url", ""),
         "api_key_env": data.get("api_key_env", f"{name.upper()}_API_KEY"),
         "default": data.get("default", False),
+        "enabled": data.get("enabled", True),
         "models_endpoint": data.get("models_endpoint", ""),
         # SSL: verify_ssl=false — для self-signed; ca_bundle — путь к своему CA
         "verify_ssl": data.get("verify_ssl", True),
@@ -1553,6 +1651,19 @@ async def add_provider(request: Request):
 
     if not provider["base_url"]:
         raise HTTPException(status_code=400, detail="base_url is required")
+
+    # F2: инвариант «default_provider всегда включён».
+    # Проверяем по ИТОГОВОМУ состоянию, а не по предшествующему:
+    # - провайдер, который станет default'ом (default=true), обязан быть включён;
+    # - текущий default_provider тоже нельзя выключить.
+    # Иначе default_provider окажется выключенным → все запросы упираются
+    # в 400 "Provider 'X' is disabled".
+    becomes_default = provider.get("default", False) or name == state.default_provider
+    if becomes_default and not provider.get("enabled", True):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot disable default provider '{name}'"
+        )
 
     # Если провайдер уже существует — обновляем, сохраняя ключи
     old_provider = state.providers.get(name, {})
@@ -1623,17 +1734,80 @@ async def delete_provider(name: str):
     if len(state.providers) <= 1:
         raise HTTPException(status_code=400, detail="Cannot delete the last provider")
 
+    # F2: новый default выбираем ТОЛЬКО среди включённых провайдеров.
+    # Раньше брался первый ключ словаря — он мог быть выключенным, и тогда
+    # default_provider становился выключенным → все запросы упирались в
+    # 400 "Provider 'X' is disabled". Если включённых не осталось — отказ
+    # (удалять последнего включённого провайдера нельзя).
+    next_default = None
+    if name == state.default_provider:
+        candidates = [
+            p
+            for p in state.providers
+            if p != name and state.is_provider_enabled(p)
+        ]
+        if not candidates:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot delete the last enabled provider"
+            )
+        next_default = candidates[0]
+
     del state.providers[name]
     invalidate_provider_clients(name)
 
-    # Если удалили активного — назначаем первого
-    if name == state.default_provider:
-        state.default_provider = next(iter(state.providers.keys()))
+    # Если удалили активного — назначаем первого ВКЛЮЧЁННОГО
+    if next_default is not None:
+        state.default_provider = next_default
         state.providers[state.default_provider]["default"] = True
 
     await state.save_config_yaml()
     logger.info(f"\U0001f50c Провайдер '{name}' удалён")
     return {"status": "ok", "active_provider": state.default_provider, "default_provider": state.default_provider}
+
+
+@app.delete("/providers/{name}/key")
+async def delete_provider_key(name: str):
+    """Удаляет API-ключ провайдера из .env и os.environ (F3)."""
+    if name not in state.providers:
+        raise HTTPException(status_code=404, detail=f"Provider '{name}' not found")
+
+    api_key_env = state.providers[name].get("api_key_env", "")
+    if not api_key_env:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Provider '{name}' does not use an API key"
+        )
+
+    # 1. Удаляем строку KEY= из .env (атомарно)
+    key_removed = False
+    env_file = Path(__file__).parent / ".env"
+    if env_file.exists():
+        content = env_file.read_text(encoding="utf-8")
+        new_lines = []
+        for line in content.splitlines():
+            if line.startswith(f"{api_key_env}="):
+                key_removed = True
+                # пропускаем эту строку
+            else:
+                new_lines.append(line)
+        if key_removed:
+            state._atomic_write(env_file, "\n".join(new_lines) + "\n")
+
+    # 2. Удаляем из os.environ текущего процесса
+    env_cleared = os.environ.pop(api_key_env, None) is not None
+
+    logger.info(
+        f"\U0001f511 API-ключ {api_key_env} удалён "
+        f"(key_removed={key_removed}, env_cleared={env_cleared})"
+    )
+    return {
+        "status": "ok",
+        "provider": name,
+        "api_key_env": api_key_env,
+        "key_removed": key_removed,
+        "env_cleared": env_cleared,
+    }
 
 
 @app.post("/v1/chat/completions")
@@ -1650,7 +1824,15 @@ async def proxy(request: Request):
 
     # Умная маршрутизация — возвращает составную спецификацию
     spec, role, reason = smart_route_model(original_model, body)
-    provider, model_id = resolve_model_spec(spec)
+    provider, model_id = resolve_model_spec(spec, source="client")
+
+    # F2: проверка disabled-провайдера
+    if not state.is_provider_enabled(provider):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Provider '{provider}' is disabled"
+        )
+
     body["model"] = model_id  # ← БЕЗ префикса "provider::"
 
     if spec != original_model and "::" not in original_model:
@@ -1823,13 +2005,25 @@ async def proxy(request: Request):
         last_error: Exception | None = None
         for i, chain_spec in enumerate(chain):
             is_last = i == len(chain) - 1
-            chain_provider, chain_model_id = resolve_model_spec(chain_spec)
+            chain_provider, chain_model_id = resolve_model_spec(chain_spec, source="config")
 
             key_error = _check_provider_key(chain_provider)
             if key_error:
                 if is_last:
                     raise HTTPException(status_code=502, detail=key_error)
                 logger.warning(f"\u26a0\ufe0f Fallback skip (no key): {chain_spec}")
+                continue
+
+            # F2: пропускаем выключенного провайдера в fallback
+            if not state.is_provider_enabled(chain_provider):
+                if is_last:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Provider '{chain_provider}' is disabled"
+                    )
+                logger.warning(
+                    f"\u26a0\ufe0f Fallback skip (provider disabled): {chain_spec}"
+                )
                 continue
 
             url_error = _check_provider_url(chain_provider)

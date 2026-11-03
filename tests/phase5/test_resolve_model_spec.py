@@ -37,25 +37,25 @@ class TestResolveModelSpec:
         assert model_id == "deepseek/deepseek-chat"
 
     def test_bare_id_one_provider(self):
-        """Голый ID у 1 провайдера → этот провайдер."""
+        """Голый ID у 1 НЕ-default провайдера → default_provider (F1: fail-closed)."""
         router.state.models_by_provider = {
             "openrouter": ["deepseek/deepseek-chat"],
         }
         prov, model_id = router.resolve_model_spec("deepseek/deepseek-chat")
-        assert prov == "openrouter"
+        # F1: source="client", allow_cross_provider_bare_id=false → default_provider
+        assert prov == "routerai"
         assert model_id == "deepseek/deepseek-chat"
 
-    def test_bare_id_two_providers(self, caplog):
-        """Голый ID у 2 провайдеров → default_provider + warning."""
+    def test_bare_id_two_providers(self):
+        """Голый ID у 2 провайдеров (один — default) → default_provider (F1: fail-closed)."""
         router.state.models_by_provider = {
             "openrouter": ["shared-model"],
             "routerai": ["shared-model"],
         }
         prov, model_id = router.resolve_model_spec("shared-model")
-        assert prov == "routerai"  # default_provider
+        # F1: модель есть в default_provider → default_provider без warning
+        assert prov == "routerai"
         assert model_id == "shared-model"
-        # Должен быть warning
-        assert any("нескольких провайдеров" in rec.message for rec in caplog.records)
 
     def test_bare_id_not_found(self, caplog):
         """Голый ID не найден → default_provider + warning."""

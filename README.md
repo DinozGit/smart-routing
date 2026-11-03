@@ -226,12 +226,46 @@ curl -s http://localhost:8765/v1/models | python -c "import json,sys; [print(m['
 | Поле | Смысл |
 |---|---|
 | `requires_api_key` | `false` — запрос уходит без `Authorization` (Ollama) |
+| `enabled` | `false` — провайдер **выключен**: не синкается, не попадает в `/v1/models`, не используется в fallback-цепочке. Обратимый выключатель — в отличие от удаления, `base_url`/`api_key_env`/SSL-настройки остаются на месте |
 | `pricing_mode` | `auto` — валюта определяется по типу цены (строка → USD, число → ₽) |
 | `default` | провайдер по умолчанию, fallback для моделей вне каталога |
 | `extra_headers` | доп. заголовки (OpenRouter: `HTTP-Referer`, `X-Title`) |
 | `verify_ssl` / `ca_bundle` | TLS — для корпоративных CA и self-signed |
 
 Полный формат — в **[docs/PROVIDER_CONTRACT.md](docs/PROVIDER_CONTRACT.md)**.
+
+---
+
+## Отключение провайдера и отзыв ключа
+
+Роутер **никогда сам не выбирает провайдера, которого вы не указали**: голый
+`model_id` из клиента резолвится только в каталоге провайдера по умолчанию
+(см. «Модели: формат `provider::model_id`»). Но если OpenRouter (или любой
+другой) вам не нужен — выключите его одной кнопкой, а не удаляйте:
+
+| Действие | Где | Что делает |
+|---|---|---|
+| **Enabled** (тумблер) | вкладка **🔌 Providers** | провайдер выключается: роутер к нему не обращается, его модели исчезают из `/v1/models` и из выпадающих списков |
+| **Remove key** | вкладка **🔌 Providers** | ключ удаляется из `.env` **и** из окружения текущего процесса — действует **без перезапуска** роутера |
+
+```bash
+# Выключить провайдера
+curl -s -X POST http://127.0.0.1:8765/providers \
+     -H "Content-Type: application/json" \
+     -d '{"name":"openrouter","enabled":false,"base_url":"https://openrouter.ai/api/v1/chat/completions","models_endpoint":"https://openrouter.ai/api/v1/models","api_key_env":"OPENROUTER_API_KEY","requires_api_key":true,"pricing_mode":"auto"}'
+
+# Отозвать ключ
+curl -s -X DELETE http://127.0.0.1:8765/providers/openrouter/key
+```
+
+> ⚠️ **Ручное удаление строки из `.env` не работает** на уже запущенном
+> роутере: переменная окружения остаётся в памяти процесса, и запросы
+> продолжат уходить. Пользуйтесь **Remove key** — он чистит и файл, и
+> окружение процесса.
+>
+> Если ключ экспортирован в системе или в профиле оболочки, он вернётся при
+> перезапуске роутера. Проверьте: `echo $OPENROUTER_API_KEY` (Linux/macOS),
+> `echo %OPENROUTER_API_KEY%` (Windows).
 
 ---
 
@@ -271,6 +305,7 @@ curl -s http://localhost:8765/stats | python -m json.tool
 | `GET` | `/admin` | Веб-админка |
 | `GET`/`POST` | `/config` | Конфигурация ролей и агентов |
 | `GET`/`POST`/`DELETE` | `/providers[/{name}]` | Управление провайдерами |
+| `DELETE` | `/providers/{name}/key` | Отзыв ключа: удаляет его из `.env` и из окружения процесса |
 | `GET`/`PUT` | `/roles[/{name}]/tuning` | Параметры и промпты ролей |
 | `GET` | `/models/available` | Каталог моделей, сгруппированный по провайдерам |
 | `POST` | `/models/sync` | Синхронизация каталога (тело `{"provider": "..."}` — опционально) |
@@ -313,6 +348,8 @@ curl -s http://localhost:8765/stats | python -m json.tool
 | `502 Missing API key: ROUTERAI_KEY` | Не заполнен `.env`. Проверьте `GET /providers` → `has_api_key` |
 | `{"detail":"Invalid JSON body"}` | Windows `curl` отправил тело не в UTF-8 — используйте `--data-binary @file` |
 | Модель в ответе не та, что выбрана | Указан `SmartAuto` или голое имя без `provider::` — укажите составной ID |
+| Роутер стучится в провайдера, которого я не выбирал | Проверьте `GET /providers` → `enabled`. Если `false`, но в логах есть обращения — перезапустите роутер: ключ остался в окружении процесса. Подробнее — «Отключение провайдера и отзыв ключа» |
+| После удаления ключа из `.env` провайдер всё ещё используется | Удаление из файла не действует на запущенный процесс — нажмите **Remove key** в админке |
 | В промпте лишний текст про делегирование | Та же причина — используйте `provider::model` |
 | Пустой ответ | Вкладка **Logs** в админке — там реальная ошибка провайдера |
 

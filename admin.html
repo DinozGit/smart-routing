@@ -432,6 +432,28 @@
                 transform: translateX(16px);
             }
 
+            /* Disabled provider row */
+            .provider-row.disabled {
+                opacity: 0.45;
+            }
+            .provider-row.disabled td {
+                pointer-events: none;
+            }
+            .provider-row.disabled td.actions {
+                pointer-events: auto;
+            }
+            /* Тумблер Enabled должен оставаться кликабельным у выключенного
+               провайдера — иначе его нельзя включить обратно из UI. */
+            .provider-row.disabled td.enabled-cell {
+                pointer-events: auto;
+            }
+            .warning-badge {
+                display: inline-block;
+                font-size: 11px;
+                color: #f0883e;
+                margin-top: 2px;
+            }
+
             /* Logs */
             .top-bar {
                 display: flex;
@@ -1016,6 +1038,24 @@ Loading...</pre>
                     >
                 </div>
                 <div class="config-row">
+                    <label>Enabled:</label>
+                    <div class="toggle-wrap">
+                        <label class="toggle">
+                            <input
+                                type="checkbox"
+                                id="pf-enabled"
+                                checked
+                                onchange="onProviderEnabledInput()"
+                            />
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span style="font-size: 13px; color: #8b949e"
+                            >Выключенный провайдер не используется в роутинге, его
+                            модели скрыты из списков</span
+                        >
+                    </div>
+                </div>
+                <div class="config-row">
                     <div class="toggle-wrap">
                         <label class="toggle">
                             <input type="checkbox" id="pf-default" />
@@ -1390,6 +1430,12 @@ Loading...</pre>
                 let html = '<option value="auto">auto (по роли агента)</option>';
                 const names = Object.keys(modelsByProvider).sort();
                 names.forEach((name) => {
+                    // Не показываем модели выключенных провайдеров
+                    if (
+                        providersInfo[name] &&
+                        providersInfo[name].enabled === false
+                    )
+                        return;
                     const models = (modelsByProvider[name] || []).slice();
                     models.sort((a, b) =>
                         String(a.id || "").localeCompare(String(b.id || "")),
@@ -1867,6 +1913,12 @@ Loading...</pre>
                     sel.innerHTML =
                         '<option value="">Все провайдеры</option>' +
                         names
+                            .filter(function (n) {
+                                return (
+                                    providersInfo[n] &&
+                                    providersInfo[n].enabled !== false
+                                );
+                            })
                             .map(
                                 (n) =>
                                     `<option value="${escapeHtml(n)}">${escapeHtml(
@@ -2192,21 +2244,50 @@ Loading...</pre>
                     '<table class="agent-table"><thead><tr>' +
                     "<th>Name</th><th>Base URL</th><th>Requires key</th>" +
                     "<th>Pricing mode</th><th>API Key</th><th>Default</th>" +
-                    "<th>Test</th><th></th>" +
+                    "<th>Enabled</th><th>Test</th><th></th>" +
                     "</tr></thead><tbody>" +
                     entries
                         .map(([name, p]) => {
+                            const isDisabled = p.enabled === false;
+                            const rowClass = isDisabled
+                                ? ' class="provider-row disabled"'
+                                : "";
                             const keyStatus = p.has_api_key
                                 ? '<span style="color:#3fb950">' +
                                   escapeHtml(p.api_key_masked || "set") +
-                                  "</span>"
-                                : '<span style="color:#d29922">not set</span>';
+                                  "</span>" : "";
+                            const noKeyBadge = !p.has_api_key
+                                ? '<span style="color:#d29922">нет ключа</span>' : "";
                             const reqKey =
                                 p.requires_api_key === false
                                     ? '<span style="color:#8b949e">no</span>'
                                     : '<span style="color:#58a6ff">yes</span>';
+                            const warningHtml =
+                                p.enabled !== false && !p.has_api_key
+                                    ? '<br><span class="warning-badge">⚠️ Включён, но без ключа — запросы к нему будут падать с 502</span>'
+                                    : "";
+                            const removeKeyBtn = p.api_key_env
+                                ? '<button class="btn btn-ghost" style="padding:2px 8px;font-size:10px" data-provider="' +
+                                  escapeHtml(name) +
+                                  '" onclick="removeProviderKey(this.dataset.provider)" title="Удалить ключ провайдера">Remove key</button>'
+                                : "";
+                            const keyCell =
+                                keyStatus + noKeyBadge + warningHtml;
+                            const enabledToggle =
+                                '<label class="toggle" title="' +
+                                escapeHtml(
+                                    p.enabled !== false
+                                        ? "Выключить"
+                                        : "Включить",
+                                ) +
+                                '"><input type="checkbox" data-provider="' +
+                                escapeHtml(name) +
+                                '"' +
+                                (p.enabled !== false ? " checked" : "") +
+                                ' onchange="toggleProviderEnabled(this.dataset.provider, this.checked)">'
+                                + '<span class="toggle-slider"></span></label>';
                             return (
-                                "<tr>" +
+                                "<tr" + rowClass + ">" +
                                 "<td><strong>" +
                                 escapeHtml(p.display_name || name) +
                                 '</strong><br><span style="font-size:11px;color:#8b949e">' +
@@ -2223,12 +2304,15 @@ Loading...</pre>
                                 escapeHtml(p.pricing_mode || "auto") +
                                 "</span></td>" +
                                 "<td>" +
-                                keyStatus +
+                                keyCell +
                                 "</td>" +
                                 "<td>" +
                                 (p.default
                                     ? '<span style="color:#58a6ff;font-weight:600">Default</span>'
                                     : "") +
+                                "</td>" +
+                                '<td class="actions enabled-cell">' +
+                                enabledToggle +
                                 "</td>" +
                                 '<td class="actions">' +
                                 '<button class="btn" style="padding:3px 10px;font-size:11px" onclick="testProviderConnection(\'' +
@@ -2243,7 +2327,8 @@ Loading...</pre>
                                 "')\">Edit</button> " +
                                 '<button class="btn" style="padding:3px 10px;font-size:11px" onclick="deleteProvider(\'' +
                                 escapeHtml(name) +
-                                "')\">Delete</button>" +
+                                "')\">Delete</button> " +
+                                removeKeyBtn +
                                 "</td></tr>"
                             );
                         })
@@ -2327,6 +2412,14 @@ Loading...</pre>
             }
 
             let editingProvider = null;
+            // Флаг: пользователь осознанно переключил «Enabled» в форме.
+            // Пока он не тронут, сохранение формы не должно менять enabled
+            // провайдера — иначе Edit молча включал бы выключенного.
+            let providerFormEnabledDirty = false;
+
+            function onProviderEnabledInput() {
+                providerFormEnabledDirty = true;
+            }
 
             function editProvider(name) {
                 editingProvider = name;
@@ -2354,6 +2447,9 @@ Loading...</pre>
                             p.default || false;
                         document.getElementById("pf-requires-key").checked =
                             p.requires_api_key !== false;
+                        document.getElementById("pf-enabled").checked =
+                            p.enabled !== false;
+                        providerFormEnabledDirty = false;
                         document.getElementById("pf-pricing-mode").value =
                             p.pricing_mode || "auto";
                         document.getElementById("pf-extra-headers").value =
@@ -2388,6 +2484,9 @@ Loading...</pre>
                 if (vs) vs.checked = true;
                 var rk = document.getElementById("pf-requires-key");
                 if (rk) rk.checked = true;
+                var en = document.getElementById("pf-enabled");
+                if (en) en.checked = true;
+                providerFormEnabledDirty = false;
                 var pm = document.getElementById("pf-pricing-mode");
                 if (pm) pm.value = "auto";
             }
@@ -2409,6 +2508,24 @@ Loading...</pre>
                 var pricingMode = document.getElementById(
                     "pf-pricing-mode",
                 ).value;
+                // enabled: при создании — дефолт true; при редактировании —
+                // текущее состояние провайдера, иначе Edit молча включал бы
+                // выключенного провайдера. Пользователь может осознанно
+                // изменить флаг в форме (тогда учитывается чекбокс).
+                var enabled = true;
+                var enabledBox = document.getElementById("pf-enabled");
+                if (editingProvider) {
+                    var curProvider = providersInfo[editingProvider];
+                    var currentEnabled = curProvider
+                        ? curProvider.enabled !== false
+                        : true;
+                    enabled =
+                        providerFormEnabledDirty && enabledBox
+                            ? enabledBox.checked
+                            : currentEnabled;
+                } else {
+                    enabled = enabledBox ? enabledBox.checked : true;
+                }
 
                 if (!name) {
                     showProviderStatus("err", "Name is required");
@@ -2457,6 +2574,7 @@ Loading...</pre>
                     requires_api_key: requiresKey,
                     pricing_mode: pricingMode,
                     extra_headers: extraHeaders,
+                    enabled: enabled,
                 };
 
                 fetch("/providers", {
@@ -2509,6 +2627,88 @@ Loading...</pre>
                     })
                     .catch(function (e) {
                         alert("Failed: " + e.message);
+                    });
+            }
+
+            /** Текст ошибки из ответа API (FastAPI отдаёт detail). */
+            function providerErrorText(data, fallback) {
+                if (data && typeof data.detail === "string") return data.detail;
+                if (data && data.detail) return JSON.stringify(data.detail);
+                if (data && typeof data.error === "string") return data.error;
+                return fallback || "Error";
+            }
+
+            /** Переключает флаг enabled провайдера. */
+            function toggleProviderEnabled(name, enabled) {
+                var p = providersInfo[name];
+                if (!p) return;
+                var body = {
+                    name: name,
+                    display_name: p.display_name || name,
+                    base_url: p.base_url || "",
+                    api_key_env: p.api_key_env || "",
+                    models_endpoint: p.models_endpoint || "",
+                    ca_bundle: p.ca_bundle || "",
+                    verify_ssl: p.verify_ssl !== false,
+                    default: p.default || false,
+                    requires_api_key: p.requires_api_key !== false,
+                    pricing_mode: p.pricing_mode || "auto",
+                    extra_headers: p.extra_headers || {},
+                    enabled: enabled,
+                };
+                fetch("/providers", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                })
+                    .then(function (r) {
+                        return r.json();
+                    })
+                    .then(function (data) {
+                        if (data.status === "ok") {
+                            loadProviders();
+                        } else {
+                            // Например, default_provider выключить нельзя (400).
+                            alert(
+                                "Не удалось изменить enabled: " +
+                                    providerErrorText(data),
+                            );
+                            // Перерисовка возвращает тумблер в состояние сервера.
+                            loadProviders();
+                        }
+                    })
+                    .catch(function (e) {
+                        alert("Ошибка: " + e.message);
+                        loadProviders();
+                    });
+            }
+
+            /** Удаляет API-ключ провайдера через DELETE /providers/{name}/key. */
+            function removeProviderKey(name) {
+                if (
+                    !confirm("Удалить API-ключ для провайдера '" + name + "'?")
+                )
+                    return;
+                fetch("/providers/" + encodeURIComponent(name) + "/key", {
+                    method: "DELETE",
+                })
+                    .then(function (r) {
+                        return r.json();
+                    })
+                    .then(function (data) {
+                        if (data.status === "ok") {
+                            // Ключ мог остаться в памяти вкладки — убираем.
+                            delete providerKeys[name];
+                            loadProviders();
+                        } else {
+                            alert(
+                                "Не удалось удалить ключ: " +
+                                    providerErrorText(data),
+                            );
+                        }
+                    })
+                    .catch(function (e) {
+                        alert("Ошибка: " + e.message);
                     });
             }
 
