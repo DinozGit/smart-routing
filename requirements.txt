@@ -1,5 +1,6 @@
-fastapi
-uvicorn
-httpx
-python-dotenv
-pyyaml
+# SmartRouter requires Python 3.10+ (union type syntax X | Y in annotations)
+fastapi>=0.110
+uvicorn>=0.27
+httpx>=0.27
+python-dotenv>=1.0
+pyyaml>=6.0

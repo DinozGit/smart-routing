@@ -64,7 +64,7 @@ providers:
     verify_ssl: true
     ca_bundle: ""
     extra_headers:
-      HTTP-Referer: https://github.com/smart-routing/smart-router
+      HTTP-Referer: https://github.com/DinozGit/smart-routing
       X-Title: SmartRouter
   ollama:
     display_name: Ollama (local)
