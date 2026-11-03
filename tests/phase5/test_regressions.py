@@ -320,7 +320,10 @@ class TestBug2TotalCostConversion:
         )
 
     def test_none_currency_zero_cost(self):
-        """NONE-валюта (бесплатная): всё нулевое, by_currency['NONE'] == 0."""
+        """
+        NONE-валюта (бесплатная): не создаёт запись в by_currency,
+        total_cost и usd_equivalent не меняются.
+        """
         router.state.available_models = {
             "ollama::free-model": {
                 "id": "free-model",
@@ -336,8 +339,10 @@ class TestBug2TotalCostConversion:
 
         router.log_usage("ollama::free-model", 1_000_000, 500_000)
 
+        # Бесплатная модель не должна создавать запись в by_currency
+        assert "NONE" not in router.state.stats["by_currency"]
+        # total_cost и usd_equivalent не меняются
         assert router.state.stats["total_cost"] == 0.0
-        assert router.state.stats["by_currency"].get("NONE", -1) == 0.0
         assert router.state.stats["usd_equivalent"] == 0.0
 
     def test_mixed_currencies_total_cost(self):

@@ -933,10 +933,11 @@ def log_usage(model: str, input_tokens: int, output_tokens: int):
     factor = _to_base_factor(currency)
     state.stats["total_cost"] += cost * factor  # в базовой валюте
 
-    # По-валютный учёт (в native-валюте)
-    if currency not in state.stats["by_currency"]:
-        state.stats["by_currency"][currency] = 0.0
-    state.stats["by_currency"][currency] += cost
+    # По-валютный учёт (в native-валюте) — пропускаем NONE (бесплатные модели)
+    if currency != "NONE":
+        if currency not in state.stats["by_currency"]:
+            state.stats["by_currency"][currency] = 0.0
+        state.stats["by_currency"][currency] += cost
 
     # USD-эквивалент (из native-стоимости)
     usd_rate = state.stats.get("usd_rate", 90.0)

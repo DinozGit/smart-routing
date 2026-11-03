@@ -1385,7 +1385,7 @@ Loading...</pre>
              * Значение — составной ключ "provider::model_id" (Phase 2).
              */
             function getModelOptionsHtml() {
-                let html = '<option value="auto">auto (fingerprinting)</option>';
+                let html = '<option value="auto">auto (по роли агента)</option>';
                 const names = Object.keys(modelsByProvider).sort();
                 names.forEach((name) => {
                     const models = (modelsByProvider[name] || []).slice();
@@ -1573,7 +1573,7 @@ Loading...</pre>
                             .map((l) => {
                                 let msg = l.message
                                     .replace(
-                                        /(?:UserMsg fingerprint|Fingerprint|Agent tag|spawn_agent)/g,
+                                        /(?:Agent tag|spawn_agent)/g,
                                         '<span class="hl">$&</span>',
                                     )
                                     .replace(
@@ -1648,10 +1648,14 @@ Loading...</pre>
                 const byCurrency = s.by_currency || {};
                 const usdEq = Number(s.usd_equivalent || 0);
                 const usdRate = Number(s.usd_rate || 90.0);
-                const entries = Object.keys(byCurrency).map((cur) => ({
-                    code: String(cur).toUpperCase(),
-                    amount: Number(byCurrency[cur] || 0),
-                }));
+                // NONE — псевдо-валюта бесплатных моделей (Ollama):
+                // денег нет, показывать нечего — фильтруем.
+                const entries = Object.entries(byCurrency)
+                    .map(([cur, amount]) => ({
+                        code: String(cur).toUpperCase(),
+                        amount: Number(amount || 0),
+                    }))
+                    .filter((e) => e.code !== "NONE");
                 if (!entries.length && !usdEq) {
                     el.textContent =
                         "Cost by currency: нет данных (это нормально до первого запроса)";
@@ -1663,14 +1667,10 @@ Loading...</pre>
                 // Эквивалент в базовой валюте: usd_rate — курс к базовой валюте
                 // (для базы RUB это 90 RUB за 1 USD), для USD-базы — 1:1.
                 const baseEquiv = baseCode === "USD" ? usdEq : usdEq * usdRate;
-                // Показываем эквивалент, только если он несёт новую информацию
-                // (иначе он просто дублирует единственную native-сумму).
-                const onlyNative =
-                    entries.length === 1 && entries[0].code === baseCode;
-                const differs =
-                    !onlyNative ||
-                    Math.abs(baseEquiv - entries[0].amount) > 0.01;
-                if (usdEq && differs) {
+                // «≈» показываем только если в списке есть не-base валюта
+                // (иначе он просто дублирует native-сумму).
+                const hasForeign = entries.some((e) => e.code !== baseCode);
+                if (usdEq && (hasForeign || !entries.length)) {
                     parts.push(
                         "≈ " +
                             formatMoney(baseCode, baseEquiv.toFixed(2)) +
@@ -1778,7 +1778,7 @@ Loading...</pre>
             }
 
             // ========== Init ==========
-            // "auto" = fingerprinting (не принудительно)
+            // "auto" = по роли агента (не принудительно)
             availableModels = ["auto"];
 
             // ========== Models Tab ==========
