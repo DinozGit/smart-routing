@@ -1,8 +1,8 @@
 {
   "role_models": {
-    "coordinator": "routerai::anthropic/claude-sonnet-4.6",
-    "worker_default": "routerai::deepseek/deepseek-v4.1-flash",
-    "worker_img": "routerai::qwen/qwen3.8-27b"
+    "coordinator": "routerai::minimax/minimax-m3",
+    "worker_default": "routerai::qwen/qwen3.8-27b",
+    "worker_img": "routerai::qwen/qwen3.7-flash"
   },
   "agent_to_worker_mapping": {
     "database": "auto",
@@ -15,12 +15,12 @@
     "mobile": "auto",
     "design": "auto"
   },
-  "default_worker": "routerai::deepseek/deepseek-v4.1-flash",
+  "default_worker": "routerai::qwen/qwen3.8-27b",
   "enable_auto_routing": true,
   "role_fallbacks": {
     "coordinator": "routerai::deepseek/deepseek-v4.1-flash",
-    "worker_default": "routerai::anthropic/claude-sonnet-4.6",
-    "worker_img": "routerai::deepseek/deepseek-v4.1-flash"
+    "worker_default": "routerai::deepseek/deepseek-v4-flash",
+    "worker_img": "routerai::qwen/qwen3.8-27b"
   },
   "role_tuning": {
     "coordinator": {
