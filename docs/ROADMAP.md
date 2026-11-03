@@ -8,8 +8,8 @@
 │                                                          │
 │  ┌────────────────────┐   ┌──────────────────────────┐  │
 │  │   Admin Panel      │   │     Routing Engine        │  │
-│  │  (управление)      │   │  (маршрутизация +        │  │
-│  │                    │   │   fingerprinting)         │  │
+│  │  (управление)      │   │  (маршрутизация по тегу    │  │
+│  │                    │   │   [AGENT:name])             │  │
 │  └────────┬───────────┘   └───────────┬──────────────┘  │
 │           │                           │                  │
 │  ┌────────┴───────────────────────────┴──────────────┐  │
@@ -136,9 +136,9 @@ curl -s -X POST http://localhost:8765/v1/chat/completions -H "Content-Type: appl
 
 **Причина отклонения:** Coordinator в Zed — это не роль SmartRouter'а, а **главный thread чата**, который сам spawn'ит sub-agent'ов через `[AGENT:name]` тег. Текущая архитектура маршрутизации работает стабильно:
 
-- Coordinator в Zed → Coordinator-модель (deepseek-v4-pro / minimax-m3)
-- Sub-agent `[AGENT:database]` → worker_default (deepseek-v4-flash)
-- Sub-agent `[AGENT:mobile]` → worker_img (qwen3-coder-next)
+- Coordinator в Zed → Coordinator-модель (`routerai::minimax/minimax-m3`)
+- Sub-agent `[AGENT:database]` → worker_default (`routerai::qwen/qwen3.8-27b`)
+- Sub-agent `[AGENT:mobile]` → worker_img (`routerai::qwen/qwen3.7-flash`)
 
 Heuristic "короткий system prompt → default_worker" **отклонён**, т.к. может сломать короткие Coordinator-промпты (например, через CLI). Если Coordinator забудет тег `[AGENT:name]` — лучше чинить Coordinator'а, чем скрывать баг эвристикой.
 
@@ -398,10 +398,9 @@ tests/
 │   └── test_config.py          # /config (загрузка/сохранение)
 │
 ├── phase1/
-│   ├── test_fingerprinting.py  # Fingerprint-паттерны (sys prompt + user msg)
-│   ├── test_routing_logic.py   # smart_route_model() — все 8 шагов
-│   ├── test_sub_agent.py       # Sub-agent fallback heuristic
-│   ├── test_natural_lang.py    # Естественно-языковые паттерны
+│   ├── test_dehardcode.py    # smart_route_model() — Coordinator fallback
+│   ├── test_sub_agent.py     # Sub-agent без system prompt
+│   │
 │   └── test_providers_api.py   # /providers CRUD
 │
 ├── phase2/
@@ -441,14 +440,16 @@ tests/
 pytest tests/phase0/ -v
 ```
 
-#### Phase 1 — Quick Wins (sub-agent fallback + fingerprint)
+#### Phase 1 — Quick Wins (sub-agent fallback + fingerprint) — ❌ ОТКЛОНЕНО
+
+> Fingerprinting отключён в 2026-07, его код **удалён** в 2026-11
+> (~317 строк). Тесты этого фазы (`test_fingerprinting.py`, `test_natural_lang.py`)
+> удалены вместе с кодом. Маршрутизация — только по тегу `[AGENT:name]`.
 
 | Тест | Что проверяет | Критерий успеха |
-|------|-------------|----------------|
-| `test_fingerprinting.py` | `fingerprint_system_prompt()` для всех 10 агентов | Каждый агент ≥ порога |
-| `test_routing_logic.py` | Все 8 шагов `smart_route_model()` | Корректная маршрутизация |
-| `test_sub_agent.py` | Sub-agent без system prompt → default_worker | Не Coordinator, а Flash |
-| `test_natural_lang.py` | Естественный язык: "создай таблицу" → database | Score ≥ порога |
+|------|---------------|----------------|
+| `test_dehardcode.py` | Неизвестный запрос → Coordinator | Корректная маршрутизация |
+| `test_sub_agent.py` | Sub-agent без system prompt | Не Coordinator, а worker |
 | `test_providers_api.py` | CRUD провайдеров, сохранение ключей | Создать/обновить/удалить |
 
 ```bash
@@ -511,7 +512,10 @@ pytest tests/phase4/ -v
 pytest tests/phase5/ -v
 ```
 
-**Итого: 243 теста, все зелёные** (`pytest tests/ -q`).
+**Итого: 257 тестов, все зелёные** (`pytest tests/ -q`).
+
+Требование Python **3.10+** (union-типы в аннотациях). CI гоняет сюиту
+на 3.10 / 3.11 / 3.12 / 3.13 (`.github/workflows/ci.yml`).
 
 #### Phase 6 — Docker + Production
 
@@ -643,7 +647,7 @@ class SkillEngine:
 Неделя 3-4 ─────────────────────────────────────────────────
 🟡 P2  ├── Provider failover (RouterAI → OpenRouter)            ⏳ Phase 3
 🟡 P2  ├── Rate limiting                                         ⏳ Спринт 3
-🟡 P2  ├── Тесты (pytest)                                        ✅ 198 тестов
+🟡 P2  ├── Тесты (pytest)                                        ✅ 257 тестов
 🟡 P2  └── Docker                                                ⏳
 
 Месяц 2+ ───────────────────────────────────────────────────
@@ -663,9 +667,9 @@ class SkillEngine:
 ## 🔄 Статус выполнения
 
 - [x] Переименование в SmartRouter
-- [x] System prompt fingerprinting
+- [x] ~~System prompt fingerprinting~~ → ❌ ОТКЛОНЁН и **удалён** 2026-11 (~317 строк)
 - [x] `[AGENT:name]` префикс в AGENTS.md
-- [x] User message fingerprinting
+- [x] ~~User message fingerprinting~~ → ❌ ОТКЛОНЁН и **удалён** 2026-11
 - [x] Админ-панель: логи + агенты + провайдеры
 - [x] Сохранение провайдеров + API-ключей из админки
 - [x] config.yaml + routing.json
@@ -688,10 +692,15 @@ class SkillEngine:
 - [x] **🔌 Transport hardening: ретраи при сетевых/SSL-ошибках, connect-таймаут 20 с, per-provider `verify_ssl` / `ca_bundle`, честный текст ошибки в SSE** (commit 66204a2, 2026-11)
 - [x] **🔐 P0: атомарная запись конфигов** — `*.tmp` + `os.replace()`, битый `routing.json` сохраняется как `*.broken` и не перезаписывается дефолтами (commit 04d1fd8, 2026-11)
 - [x] **📚 План мультипровайдерной переработки** — [`docs/MULTIPROVIDER_PLAN.md`](MULTIPROVIDER_PLAN.md) (commit ec52f46)
-- [x] **📊 Итого: 198 тестов, все зелёные** (`pytest tests/ -q`)
+- [x] **📊 Итого: 257 тестов, все зелёные** (`pytest tests/ -q`), CI на Python 3.10–3.13
 - [x] **🧪 Phase 1 — каталог моделей по провайдерам** (+ фильтрация text→text, миграция кеша v1→v2, pricing-адаптеры, валюты) ✅ 2026-11
 - [x] **🧪 Phase 2 — `resolve_model_spec`, ключи `provider::model_id`, провайдер определяется по модели** ✅ 2026-11
 - [x] **🧹 Удаление мёртвого fingerprint-кода** (~317 строк + тесты) ✅ 2026-11
+- [x] **🔑 Явная спецификация клиента = точное указание** (`provider::model` не перемаршрутизируется) ✅ 2026-11
+- [x] **💱 Курс валют исправлен** — `usd_rate` как единственный источник правды (была инверсия, `total_cost` занижался в 8100 раз) ✅ 2026-11
+- [x] **🧪 Сюита не зависит от локального `.env`** — CI на 4 версиях Python ✅ 2026-11
+- [x] **📄 Подготовка к публикации**: MIT, README для пользователя, SECURITY.md, CONTRIBUTING.md, CI, `.gitattributes` ✅ 2026-11
+- [x] **🖼 Подбор моделей под возможности роли** — vision только там, где реально приходят картинки ✅ 2026-11
 - [x] **🐛 4 бага, найденных ручным прогоном** (цена чужого провайдера, смешение валют в `total_cost`, затирание ролей в `POST /config`, двойной префикс в `/v1/models`) ✅ 2026-11
 - [ ] 🟠 P1: **Phase 3 — cross-provider fallback** (цепочка уже умеет уходить на другого провайдера; нужен UI для `role_fallbacks` и явная логика 5xx/таймаутов)
 - [ ] 🟠 P1: **Phase 4 — остатки**: авто-курс валют (4.6), лимиты, `context_length` → cap `max_tokens` для всех провайдеров (4.7)

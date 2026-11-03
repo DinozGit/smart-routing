@@ -23,6 +23,7 @@ graph LR
 | **Провайдеры** | прибиты к одному | RouterAI, OpenRouter, локальный Ollama — переключаются без кода |
 | **Стоимость** | непрозрачна | посчитана в рублях **и** долларах, с USD-эквивалентом |
 | **Каталог моделей** | ручной список | 760 моделей, синхронизируются автоматически |
+| **Цены** | зашиты в коде | живые из каталога провайдера, в рублях **и** долларах |
 | **Не-текстовые модели** | в общем списке | отфильтрованы (картинки, видео, TTS, эмбеддинги) |
 
 **Экономия на агентных задачах — до 90%.** Worker-агенту (чтение файлов, тесты,
@@ -84,8 +85,7 @@ curl http://localhost:8765/health
 
 Откройте <http://localhost:8765/admin> → вкладка **Models** → **«Sync всех»**.
 
-Скачается каталог всех провайдеров: **351** RouterAI + **399** OpenRouter +
-**10** Ollama = **760** моделей с ценами и валютами.
+Скачается каталог всех провайдеров: **351** RouterAI + **399** OpenRouter + **10** Ollama = **760** моделей с ценами и валютами.
 
 ### 5. Подключить клиент
 
@@ -153,13 +153,21 @@ resp = client.chat.completions.create(
 
 Роутер работает с **составными** идентификаторами — с указанием провайдера:
 
-| ID | Провайдер | Цена за 1M токенов | Контекст |
-|---|---|---|---|
-| `routerai::deepseek/deepseek-v4-flash` | RouterAI | **6.02 / 12.04 ₽** | 1M |
-| `routerai::minimax/minimax-m3` | RouterAI | 24.09 / 100.54 ₽ | 1M |
-| `routerai::deepseek/deepseek-v4-pro` | RouterAI | 131.95 / 219.92 ₽ | 1M |
-| `openrouter::z-ai/glm-5.3-flash` | OpenRouter | 0.03 / 0.09 **$** | 1M |
-| `ollama::qwen3:4b` | Ollama | **0 / 0** | 256K |
+| ID | Провайдер | Цена за 1M токенов | Контекст | Картинки |
+|---|---|---|---|---|
+| `routerai::qwen/qwen3.8-27b` | RouterAI | **0.42 / 25.79 ₽** | 1000K | ✅ |
+| `routerai::qwen/qwen3.7-flash` | RouterAI | 3.16 / 13.68 ₽ | 976K | ✅ |
+| `routerai::minimax/minimax-m3` | RouterAI | 24.21 / 101.05 ₽ | 1024K | ✅ |
+| `routerai::deepseek/deepseek-v4-flash` | RouterAI | 10.00 / 20.00 ₽ | 1024K | ❌ |
+| `routerai::deepseek/deepseek-v4-pro` | RouterAI | 132.63 / 221.06 ₽ | 1024K | ❌ |
+| `openrouter::z-ai/glm-5.3-flash` | OpenRouter | 0.03 / 0.08 **$** | 1024K | ✅ |
+| `ollama::qwen3:4b` | Ollama | **0 / 0** | 256K | ❌ |
+
+> ⚠️ **Колонка «Картинки» важна при выборе модели.**
+> Модель без поддержки изображений возвращает от провайдера
+> `400 Model '...' does not support image input` — если запрос пришёл со скриншотом.
+> Coordinator получает скриншоты, поэтому ему нужна vision-модель;
+> worker'ам, которые только читают код, она не требуется.
 
 Список всех моделей:
 
@@ -178,13 +186,17 @@ curl -s http://localhost:8765/v1/models | python -c "import json,sys; [print(m['
 Для IDE с поддержкой субагентов (Zed, Roo Code) роутер умеет сам выбирать модель
 по типу агента.
 
-Три роли:
+Три роли. Модель подобрана под то, что роль **реально получает**:
 
-| Роль | Модель по умолчанию | Для кого |
-|---|---|---|
-| `coordinator` | `routerai::minimax/minimax-m3` | координатор: декомпозиция, ревью |
-| `worker_default` | `routerai::deepseek/deepseek-v4-flash` | backend, тесты, боты, devops |
-| `worker_img` | `routerai::qwen/qwen3-coder-next` | frontend, mobile, design |
+| Роль | Модель по умолчанию | Цена за 1M | Картинки | Для кого |
+|---|---|---|---|---|
+| `coordinator` | `routerai::minimax/minimax-m3` | 24.21 ₽ | ✅ | координатор: декомпозиция, ревью, **скриншоты** |
+| `worker_default` | `routerai::qwen/qwen3.8-27b` | **0.42 ₽** | ✅ | backend, тесты, боты, devops — только чтение кода |
+| `worker_img` | `routerai::qwen/qwen3.7-flash` | 3.16 ₽ | ✅ | frontend, mobile, design — работа с визуалом |
+
+Разрыв между coordinator и worker — **57×**. Именно в этом и смысл роутера:
+координатору нужна vision-модель, потому что к нему приходят скриншоты,
+а worker'ам, которые только читают и пишут код, хватает текстовой.
 
 Выбор роли — по тегу `[AGENT:name]` в сообщении:
 
