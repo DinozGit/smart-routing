@@ -1,7 +1,7 @@
 {
   "role_models": {
-    "coordinator": "routerai::minimax/minimax-m3",
-    "worker_default": "routerai::deepseek/deepseek-v4-flash",
+    "coordinator": "routerai::deepseek/deepseek-v4.1-flash-1017",
+    "worker_default": "routerai::deepseek/deepseek-v4.1-flash-1017",
     "worker_img": "routerai::minimax/minimax-m3.1-flash"
   },
   "agent_to_worker_mapping": {
