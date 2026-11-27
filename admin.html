@@ -2337,25 +2337,23 @@ Loading...</pre>
             }
 
             /**
-             * Проверка доступности провайдера напрямую из браузера.
-             * Backend-эндпоинта нет — делаем GET на models_endpoint.
-             * CORS у провайдеров может не пускать — тогда показываем,
-             * что проверка из браузера недоступна.
+             * Проверка провайдера через бэкенд: POST /providers/{name}/test.
+             * Раньше браузер ходил напрямую на models_endpoint, но CORS
+             * провайдера блокировал ответ (Failed to fetch), а API-ключ уходил
+             * с машины пользователя. Теперь запрос делает локальный роутер.
              */
             async function testProviderConnection(name) {
-                const p = providersInfo[name];
                 const out = document.getElementById("provider-test-" + name);
-                if (!p) return;
-                if (!p.models_endpoint) {
-                    out.innerHTML =
-                        '<span style="color:#f85149">models_endpoint не настроен</span>';
-                    return;
-                }
-                out.innerHTML = '<span style="color:#8b949e">⏳ Проверка...</span>';
-                const headers = {};
-                // Ключ берём из сессии вкладки: он был введён в форме провайдера.
-                let key = providerKeys[name];
-                if (!key) {
+                if (!out) return;
+                out.innerHTML =
+                    '<span style="color:#8b949e">⏳ Проверка...</span>';
+
+                // Ключ, ещё не сохранённый на сервере (введён в форме, но не
+                // сохранён через Save). Уходит только на локальный роутер —
+                // провайдеру из браузера ключ больше не отправляется.
+                const body = {};
+                let unsavedKey = providerKeys[name];
+                if (!unsavedKey) {
                     const keyField = document.getElementById("pf-key");
                     const nameField = document.getElementById("pf-name");
                     if (
@@ -2364,51 +2362,71 @@ Loading...</pre>
                         nameField.value.trim() === name &&
                         keyField.value.trim()
                     ) {
-                        key = keyField.value.trim();
+                        unsavedKey = keyField.value.trim();
                     }
                 }
-                if (key) headers["Authorization"] = "Bearer " + key;
-                const extra = p.extra_headers || {};
-                Object.keys(extra).forEach((k) => {
-                    headers[k] = extra[k];
-                });
+                if (unsavedKey) body.api_key = unsavedKey;
+
+                let resp;
                 try {
-                    const resp = await fetch(p.models_endpoint, {
-                        method: "GET",
-                        headers: headers,
-                        mode: "cors",
-                        cache: "no-store",
-                    });
-                    if (!resp.ok) {
-                        let detail = resp.statusText || "";
-                        try {
-                            const body = await resp.text();
-                            if (body) detail = body.slice(0, 160);
-                        } catch (e2) {}
-                        out.innerHTML =
-                            '<span style="color:#f85149">❌ HTTP ' +
-                            resp.status +
-                            (detail ? " — " + escapeHtml(detail) : "") +
-                            "</span>";
-                        return;
-                    }
-                    const data = await resp.json().catch(() => null);
-                    let count = null;
-                    if (Array.isArray(data)) count = data.length;
-                    else if (data && Array.isArray(data.data))
-                        count = data.data.length;
-                    else if (data && Array.isArray(data.models))
-                        count = data.models.length;
-                    out.innerHTML =
-                        '<span style="color:#3fb950">✅ OK' +
-                        (count !== null ? " (" + count + " моделей)" : "") +
-                        "</span>";
+                    resp = await fetch(
+                        "/providers/" + encodeURIComponent(name) + "/test",
+                        {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(body),
+                        },
+                    );
                 } catch (e) {
                     out.innerHTML =
-                        '<span style="color:#d29922">проверка недоступна из браузера (CORS или сеть): ' +
+                        '<span style="color:#f85149">❌ Роутер недоступен: ' +
                         escapeHtml(e.message || "network error") +
                         "</span>";
+                    return;
                 }
+
+                const data = await resp.json().catch(() => null);
+                if (!resp.ok) {
+                    out.innerHTML =
+                        '<span style="color:#f85149">❌ ' +
+                        escapeHtml(
+                            providerErrorText(data, "HTTP " + resp.status),
+                        ) +
+                        "</span>";
+                    return;
+                }
+                if (!data) {
+                    out.innerHTML =
+                        '<span style="color:#f85149">❌ Пустой ответ роутера</span>';
+                    return;
+                }
+
+                let color = "#f85149";
+                let text;
+                if (data.status === "ok") {
+                    color = "#3fb950";
+                    const parts = [];
+                    if (data.models_count != null)
+                        parts.push(data.models_count + " моделей");
+                    if (data.latency_ms != null)
+                        parts.push(data.latency_ms + " ms");
+                    text =
+                        "✅ OK" +
+                        (parts.length ? " (" + parts.join(", ") + ")" : "");
+                } else if (data.reachable === false) {
+                    text = "❌ " + (data.error || "провайдер недоступен");
+                } else if (data.auth_ok === false) {
+                    text =
+                        "❌ Ключ не принят (HTTP " +
+                        (data.http_status != null ? data.http_status : "?") +
+                        ")";
+                } else {
+                    text = "❌ " + (data.error || "неизвестная ошибка");
+                }
+                out.innerHTML =
+                    '<span style="color:' + color + '">' +
+                    escapeHtml(text) +
+                    "</span>";
             }
 
             let editingProvider = null;

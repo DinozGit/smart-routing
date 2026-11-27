@@ -835,3 +835,138 @@ UI **не** реализует собственную логику удален�
 | `GET /providers` | **добавляется** поле `enabled` (не ломает UI — лишнее поле игнорируется) |
 | Существующие 257 тестов | должны остаться зелёными; если тест падает из-за нового поведения F1 — тест правится **только** с обоснованием в комментарии |
 | Каталог моделей | формат `models_cache.json` **не меняется** |
+
+---
+
+## F10. `POST /providers/{name}/test` — проверка провайдера на сервере
+
+### Проблема
+
+«Test connection» в админке сейчас выполняется **в браузере**:
+`fetch(p.models_endpoint, {mode: "cors"})` (`admin.html:2376`) идёт с
+`http://127.0.0.1:8765` напрямую на `https://openrouter.ai/api/v1/models`.
+Провайдер не отдаёт `Access-Control-Allow-Origin` → браузер блокирует ответ →
+`TypeError: Failed to fetch` → в UI появляется
+«проверка недоступна из браузера (CORS или сеть)».
+
+**Это ограничение браузера, а не баг роутера** — починить на фронтенде
+невозможно. Дополнительно такая схема кладёт API-ключ в `Authorization`
+**в браузере** (виден в DevTools → Network).
+
+### Контракт
+
+**Эндпоинт:**
+
+```
+POST /providers/{name}/test
+```
+
+**Тело (опционально):**
+
+```json
+{}                        // проверять сохранённый ключ (из api_key_env)
+{ "api_key": "sk-..." }    // проверить ещё не сохранённый ключ
+```
+
+Ключ из тела **не сохраняется** в `.env`.
+
+**Ответ `200`** — тест всегда возвращает диагностику, а не HTTP-ошибку
+(сам факт «провайдер недоступен» — это успешно выполненный тест):
+
+```json
+{
+  "status": "ok",
+  "provider": "openrouter",
+  "reachable": true,
+  "auth_ok": true,
+  "http_status": 200,
+  "models_count": 399,
+  "latency_ms": 412,
+  "url": "https://openrouter.ai/api/v1/models",
+  "error": null
+}
+```
+
+| Поле | Смысл |
+|---|---|
+| `status` | `"ok"` \| `"error"` — итог проверки |
+| `reachable` | `true` — удалось получить HTTP-ответ; `false` — сетевая ошибка/таймаут |
+| `auth_ok` | `true` — 2xx; `false` — 401/403; `null` — иная ошибка или ключ не требовался |
+| `http_status` | статус ответа провайдера, `null` при сетевой ошибке |
+| `models_count` | число моделей в ответе, `null` если ответ не каталог |
+| `latency_ms` | время ответа в миллисекундах |
+| `url` | какой `models_endpoint` проверялся |
+| `error` | человекочитаемая ошибка или `null` |
+
+### Поведение
+
+| Ситуация | Результат |
+|---|---|
+| Провайдер не найден | `404` `{"detail": "Provider 'X' not found"}` |
+| `models_endpoint` пуст | `200`, `status:"error"`, `reachable:false`, `error:"models_endpoint не настроен"` |
+| `requires_api_key: true`, ключа нет ни в `.env`, ни в теле | `200`, `status:"error"`, `reachable:false`, `auth_ok:false`, `error:"Missing API key: X"` — **без исходящего запроса** |
+| Провайдер ответил `200` | `200`, `status:"ok"`, `reachable:true`, `auth_ok:true`, `http_status:200`, `models_count:N` |
+| Провайдер ответил `401`/`403` | `200`, `status:"error"`, `reachable:true`, `auth_ok:false`, `http_status:N`, `error:"HTTP N — неверный или отозванный ключ"` |
+| Провайдер ответил иной не-2xx | `200`, `status:"error"`, `reachable:true`, `auth_ok:null`, `http_status:N`, `error:"HTTP N: <первые 160 символов тела>"` |
+| Сетевая ошибка / таймаут | `200`, `status:"error"`, `reachable:false`, `http_status:null`, `error:"<type>: <msg>"` |
+
+### Требования к реализации
+
+- **Таймаут — 10 секунд** (не 30, как у синка: тест должен отвечать быстро).
+- Использовать `get_provider_client(name)` — учитывает `verify_ssl` / `ca_bundle`.
+- Использовать `extra_headers` провайдера (OpenRouter: `HTTP-Referer`, `X-Title`).
+- **Не** проверять `enabled`: тест доступен и для выключенного провайдера
+  (пользователь как раз проверяет его перед включением).
+- `models_count` извлекать так же, как в существующем коде синка:
+  `data["data"]` → `data["models"]` → сам массив.
+- Лог: `🧪 Тест провайдера 'X': ok|error (HTTP N, Nms)` — уровень INFO.
+
+---
+
+## F11. UI «Test connection» — через бэкенд
+
+### Что меняется в `admin.html`
+
+`testProviderConnection(name)` **перестаёт** ходить в браузер к провайдеру и
+вызывает `POST /providers/{name}/test`.
+
+**Тело запроса:**
+
+```js
+const body = {};
+const unsavedKey = providerKeys[name] || /* ключ из поля pf-key */ null;
+if (unsavedKey) body.api_key = unsavedKey;
+```
+
+**Отрисовка результата:**
+
+| Ответ | Текст в UI |
+|---|---|
+| `status:"ok"` | `✅ OK (N моделей, M ms)` — зелёный |
+| `reachable:false` | `❌ <error>` — красный |
+| `auth_ok:false` | `❌ Ключ не принят (HTTP N)` — красный |
+| `status:"error"`, `reachable:true` | `❌ <error>` — красный |
+
+### Требования
+
+- **Удалить** прямой `fetch(p.models_endpoint, {mode:"cors"})` и сообщение
+  «проверка недоступна из браузера (CORS или сеть)» — оно больше не нужно.
+- Весь вставляемый текст экранировать через `escapeHtml()`.
+- `providerKeys` (ключ в памяти вкладки) **остаётся** — но теперь служит
+  только для передачи ещё не сохранённого ключа в **локальный** эндпоинт,
+  а не для отправки провайдеру из браузера.
+- Обрабатывать ошибки `fetch` к **своему** роутеру отдельно:
+  `❌ Роутер недоступен: <msg>`.
+
+---
+
+## F12. Матрица write scope (hotfix)
+
+| Агент | Write scope | Задачи |
+|---|---|---|
+| `api` | `router.py` | F10 |
+| `frontend` | `admin.html` | F11 |
+| `tests` | `tests/phase6/` | тесты F10 (по запросу координатора) |
+
+**Порядок:** `api` и `frontend` параллельно — write scope не пересекаются,
+оба опираются на этот контракт.

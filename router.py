@@ -1810,6 +1810,132 @@ async def delete_provider_key(name: str):
     }
 
 
+@app.post("/providers/{name}/test")
+async def test_provider(name: str, request: Request):
+    """
+    F10: серверная проверка провайдера (Test connection).
+
+    Проверка идёт сервер-к-серверу — CORS не существует. Тело опционально:
+    - {} → проверять сохранённый ключ (из api_key_env)
+    - {"api_key": "..."} → проверить ещё не сохранённый ключ
+      (ключ из тела НЕ сохраняется в .env).
+
+    Ответ всегда 200 с диагностикой; 404 — только если провайдера нет.
+    """
+    if name not in state.providers:
+        raise HTTPException(status_code=404, detail=f"Provider '{name}' not found")
+
+    provider = state.providers[name]
+    endpoint = provider.get("models_endpoint", "")
+
+    # Тело опционально — пустое/битое трактуем как {}.
+    body: dict = {}
+    try:
+        raw = await request.body()
+        if raw:
+            parsed = await request.json()
+            if isinstance(parsed, dict):
+                body = parsed
+    except Exception:
+        body = {}
+
+    # Ключ: из тела приоритетнее сохранённого (проверяем ещё не сохранённый).
+    body_key = body.get("api_key") if isinstance(body, dict) else None
+    key_env = provider.get("api_key_env", "")
+    api_key = body_key or os.getenv(key_env, "")
+
+    def _finish(
+        status: str,
+        reachable: bool,
+        auth_ok: bool | None,
+        http_status: int | None,
+        models_count: int | None,
+        latency_ms: int,
+        error: str | None,
+    ) -> dict:
+        """Единая точка: один INFO-лог на вызов + ответ контракта F10."""
+        logger.info(
+            f"\U0001f9ea Тест провайдера '{name}': {status} "
+            f"(HTTP {http_status}, {latency_ms}ms)"
+        )
+        return {
+            "status": status,
+            "provider": name,
+            "reachable": reachable,
+            "auth_ok": auth_ok,
+            "http_status": http_status,
+            "models_count": models_count,
+            "latency_ms": latency_ms,
+            "url": endpoint,
+            "error": error,
+        }
+
+    # 1. models_endpoint не настроен
+    if not endpoint:
+        return _finish(
+            "error", False, None, None, None, 0, "models_endpoint не настроен"
+        )
+
+    # 2. Ключ требуется, но его нет ни в .env, ни в теле — без исходящего запроса
+    if provider.get("requires_api_key", True) and not api_key:
+        return _finish(
+            "error", False, False, None, None, 0,
+            f"Missing API key: {key_env}",
+        )
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {sanitize_ascii(api_key)}"
+    extra = provider.get("extra_headers", {})
+    if extra and isinstance(extra, dict):
+        headers.update(extra)
+
+    # 3. Исходящий запрос к models_endpoint (таймаут 10с, SSL из конфига)
+    client = get_provider_client(name)
+    started = time.monotonic()
+    try:
+        resp = await client.get(endpoint, timeout=10.0, headers=headers)
+    except Exception as e:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        return _finish(
+            "error", False, None, None, None, latency_ms,
+            f"{type(e).__name__}: {e}",
+        )
+    latency_ms = int((time.monotonic() - started) * 1000)
+    http_status = resp.status_code
+
+    # 4. Успех (2xx) — извлекаем models_count
+    if 200 <= http_status < 300:
+        models_count: int | None = None
+        try:
+            data = resp.json()
+            # Так же, как в синке: data["data"] → data["models"] → сам массив
+            if isinstance(data, dict):
+                if isinstance(data.get("data"), list):
+                    models_count = len(data["data"])
+                elif isinstance(data.get("models"), list):
+                    models_count = len(data["models"])
+            elif isinstance(data, list):
+                models_count = len(data)
+        except Exception:
+            models_count = None
+        return _finish("ok", True, True, http_status, models_count, latency_ms, None)
+
+    # 5. 401/403 — неверный или отозванный ключ
+    if http_status in (401, 403):
+        return _finish(
+            "error", True, False, http_status, None, latency_ms,
+            f"HTTP {http_status} — неверный или отозванный ключ",
+        )
+
+    # 6. Иной не-2xx
+    snippet = (resp.text or "")[:160]
+    return _finish(
+        "error", True, None, http_status, None, latency_ms,
+        f"HTTP {http_status}: {snippet}",
+    )
+
+
 @app.post("/v1/chat/completions")
 async def proxy(request: Request):
     try:
