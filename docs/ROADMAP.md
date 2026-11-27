@@ -703,6 +703,7 @@ class SkillEngine:
 - [x] **🖼 Подбор моделей под возможности роли** — vision только там, где реально приходят картинки ✅ 2026-11
 - [x] **🐛 4 бага, найденных ручным прогоном** (цена чужого провайдера, смешение валют в `total_cost`, затирание ролей в `POST /config`, двойной префикс в `/v1/models`) ✅ 2026-11
 - [ ] 🟠 P1: **Phase 3 — cross-provider fallback** (цепочка уже умеет уходить на другого провайдера; нужен UI для `role_fallbacks` и явная логика 5xx/таймаутов)
+- [x] 🛡️ **Спринт 5 (A1–A5)** — streaming-failover, цепочки fallback, `max_tokens` на роль, формат SSE-ошибок, честный UI Fine Tuning → 2026-11 (`301 passed`)
 - [x] 🐛 **Багфиксинг F1–F7** — неявный выбор OpenRouter, неотзываемый ключ, невыключаемый провайдер → закрыты 2026-11 (18 тестов в `tests/phase6/`, `275 passed`)
 - [ ] 🟠 P1: **Phase 4 — остатки**: авто-курс валют (4.6), лимиты, `context_length` → cap `max_tokens` для всех провайдеров (4.7)
 - [ ] 🟡 P2: **Phase 5 — UX админки — остатки**: показать курс и сумму в USD в UI, бейдж цен по провайдерам
@@ -798,6 +799,42 @@ class SkillEngine:
 
 `275 тестов, все зелёные` (было 257). Контракт — `docs/PROVIDER_CONTRACT.md`,
 раздел «Контракт спринта „Багфиксинг F1–F7“».
+
+---
+
+## 🛡️ Спринт 2026-11 (3) — Отказоустойчивость и контроль вывода (A1–A5)
+
+### Что было не так
+
+| # | Проблема | Где |
+|---|----------|-----|
+| **A1** | Fallback не работал в streaming. Ветка `is_stream` шла напрямую к primary-провайдеру — цепочка существовала только для non-streaming. Zed/Cline/Cursor работают в streaming → failover не срабатывал **никогда** | `proxy()` |
+| **A2** | `role_fallbacks` — одна модель на роль, и все три указывали на **тот же** `routerai`. Кросс-провайдерный failover не был сконфигурирован | `routing.json` |
+| **A4** | `capabilities.max_tokens` отдавался в `/roles`, но в proxy **не применялся**. Cap срабатывал только если клиент сам прислал `max_tokens` | `proxy()` |
+| **A1b** | SSE-ошибки уходили строкой `data: {"error": "..."}`. При 429 клиент Zed падал: `invalid type: string "Provider error 429", expected struct ResponseStreamError` | `stream_generator()` |
+| **2.1** | В Fine Tuning было **захардкожено** «(auto from RouterAI model limit)» — даже для ролей на OpenRouter. Плюс показывался `context_length`, а не применяемый cap | `admin.html:856` |
+
+### Что сделано
+
+| # | Задача | Результат |
+|---|--------|-----------|
+| A1 | Streaming-failover «до первого байта» | Переключение разрешено, пока клиенту не отправлен ни один чанк. После первого чанка — только ошибка в SSE. `log_usage` пишет **фактически использованную** модель |
+| A1b | OpenAI-совместимый формат ошибок в SSE | `data: {"error": {"message", "type", "code"}}` — объект вместо строки. Хелпер `_sse_error()` |
+| A2 | `role_fallbacks` как **цепочка** | Список строк; строка остаётся валидной (BC). Единая `_build_fallback_chain()` для streaming и non-streaming. `POST /config` возвращает `warnings` про модели вне каталога |
+| A4 | `max_tokens` на роль | `effective = min(client_max ?? configured ?? min(cap, 16384), cap)`, где `cap = 60% × context_length`. Редактируется в Fine Tuning, хранится в `role_tuning.<role>.max_tokens` |
+| A4b | Честный UI | «Context: N tokens · OpenRouter» + редактируемый «Max Tokens» с подсказкой `cap: N (60%)`. Хардкод провайдера убран (`grep -c RouterAI admin.html` → `0`) |
+| A5 | 26 новых тестов | `tests/phase6/test_sprint5_*.py` — cap по провайдеру, цепочки, streaming-failover, формат SSE-ошибки |
+
+### Итог
+
+`301 тест, все зелёные` (было 275). Контракт — `docs/PROVIDER_CONTRACT.md`,
+раздел «🛡️ Спринт 5».
+
+> ⚠️ **Урок спринта:** ручная проверка `POST /config` без подмены
+> `state.config_file` записала тестовые данные в боевой `routing.json`
+> (потеряны модели и промпты ролей, файл восстановлен из git). Правило
+> зафиксировано в контракте: любые проверки с `save_config()` — только
+> с подменённым путём на tmp.
 
 ---
 

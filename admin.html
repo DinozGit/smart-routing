@@ -128,6 +128,28 @@
                 border-color: #58a6ff;
                 outline: none;
             }
+            .config-row input[type="number"] {
+                background: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: #c9d1d9;
+                font-size: 13px;
+                width: 140px;
+                font-variant-numeric: tabular-nums;
+            }
+            .config-row input[type="number"]:focus {
+                border-color: #58a6ff;
+                outline: none;
+            }
+            .tuning-hint {
+                font-size: 11px;
+                color: #8b949e;
+            }
+            .tuning-hint-warn {
+                font-size: 11px;
+                color: #d29922;
+            }
 
             .agent-table {
                 width: 100%;
@@ -849,13 +871,33 @@ Loading...</pre>
                     >
                 </div>
                 <div class="config-row">
-                    <label>🔒 Max Tokens Cap:</label>
+                    <label>🔒 Context:</label>
                     <span class="readonly-val" id="tuning-context-limit"
                         >-</span
                     >
-                    <span style="font-size: 11px; color: #8b949e"
-                        >(auto from RouterAI model limit)</span
+                    <span
+                        class="tuning-hint"
+                        id="tuning-context-provider"
+                    ></span>
+                </div>
+                <div class="config-row">
+                    <label for="tuning-max-tokens">🛡️ Max Tokens:</label>
+                    <input
+                        type="number"
+                        id="tuning-max-tokens"
+                        min="1"
+                        step="1"
+                        placeholder="auto"
+                        aria-describedby="tuning-max-tokens-cap tuning-max-tokens-warn"
+                        oninput="updateMaxTokensHint()"
+                    />
+                    <span class="tuning-hint" id="tuning-max-tokens-cap"
+                        >cap: -</span
                     >
+                    <span
+                        class="tuning-hint"
+                        id="tuning-max-tokens-warn"
+                    ></span>
                 </div>
             </div>
 
@@ -2732,6 +2774,8 @@ Loading...</pre>
 
             // ========== Fine Tuning ==========
             let tuningCache = {};
+            // A4: meta of the currently rendered role (context_limit / cap / effective)
+            let tuningMeta = null;
 
             function updateSliderVal(sliderId, valId) {
                 const slider = document.getElementById(sliderId);
@@ -2834,22 +2878,102 @@ Loading...</pre>
                     data.system_prompt_prefix || "";
                 updatePrefixCount();
 
-                // Fetch role detail for context_limit
-                fetch("/roles/" + role + "/tuning")
+                // Fetch role detail for context_limit / cap / provider
+                refreshTuningMeta(role);
+            }
+
+            // Group digits with a thin space: 262144 -> "262 144"
+            function formatTokens(n) {
+                return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+            }
+
+            // A4b: re-read role meta for the Context / Max Tokens rows
+            function refreshTuningMeta(role) {
+                fetch("/roles/" + encodeURIComponent(role) + "/tuning")
                     .then((r) => r.json())
                     .then((d) => {
-                        const limit = d.context_limit;
-                        document.getElementById(
-                            "tuning-context-limit",
-                        ).textContent = limit
-                            ? limit.toLocaleString() + " tokens"
-                            : "unknown";
+                        // Ignore stale responses if the user already switched role
+                        if (
+                            document.getElementById("tuning-role").value !==
+                            role
+                        ) {
+                            return;
+                        }
+                        applyTuningMeta(d);
                     })
                     .catch(() => {
-                        document.getElementById(
-                            "tuning-context-limit",
-                        ).textContent = "unknown";
+                        if (
+                            document.getElementById("tuning-role").value !==
+                            role
+                        ) {
+                            return;
+                        }
+                        applyTuningMeta({
+                            context_limit: null,
+                            max_tokens_cap: null,
+                            max_tokens_effective: null,
+                            max_tokens: null,
+                            provider_display_name: "",
+                        });
                     });
+            }
+
+            function applyTuningMeta(d) {
+                tuningMeta = d || {};
+
+                const limit = d.context_limit;
+                const cap = d.max_tokens_cap;
+
+                document.getElementById("tuning-context-limit").textContent =
+                    limit ? formatTokens(limit) + " tokens" : "unknown";
+
+                document.getElementById(
+                    "tuning-context-provider",
+                ).textContent = d.provider_display_name
+                    ? "· " + d.provider_display_name
+                    : "";
+
+                document.getElementById("tuning-max-tokens-cap").textContent =
+                    cap == null
+                        ? "cap: unknown"
+                        : "cap: " + formatTokens(cap) + " (60% of context)";
+
+                // Empty input = "auto" (max_tokens: null on the wire)
+                const input = document.getElementById("tuning-max-tokens");
+                input.value = d.max_tokens == null ? "" : String(d.max_tokens);
+                input.placeholder =
+                    d.max_tokens_effective == null
+                        ? "auto"
+                        : formatTokens(d.max_tokens_effective);
+
+                updateMaxTokensHint();
+            }
+
+            // A4: warn if value exceeds cap (saving is not blocked)
+            function updateMaxTokensHint() {
+                const input = document.getElementById("tuning-max-tokens");
+                const warn = document.getElementById("tuning-max-tokens-warn");
+                if (!input || !warn) return;
+
+                const raw = input.value.trim();
+                const cap = tuningMeta ? tuningMeta.max_tokens_cap : null;
+                warn.className = "tuning-hint";
+
+                if (raw === "" || cap == null) {
+                    warn.textContent = "";
+                    return;
+                }
+
+                const val = Number(raw);
+                if (!Number.isInteger(val) || val <= 0) {
+                    warn.textContent = "must be a positive integer";
+                    warn.className = "tuning-hint-warn";
+                    return;
+                }
+
+                warn.textContent =
+                    val > cap ? "будет обрезано до " + formatTokens(cap) : "";
+                if (val > cap) warn.className = "tuning-hint-warn";
             }
 
             function setSlider(id, value) {
@@ -2865,6 +2989,22 @@ Loading...</pre>
                 const role = document.getElementById("tuning-role").value;
                 const status = document.getElementById("tuning-status");
                 const btn = document.getElementById("btn-save-tuning");
+
+                // A4: empty input -> null (auto), otherwise a positive integer
+                const maxTokensRaw = document
+                    .getElementById("tuning-max-tokens")
+                    .value.trim();
+                let maxTokens = null;
+                if (maxTokensRaw !== "") {
+                    const parsed = Number(maxTokensRaw);
+                    if (!Number.isInteger(parsed) || parsed <= 0) {
+                        status.className = "save-status err";
+                        status.textContent =
+                            "max_tokens must be a positive integer or empty (auto)";
+                        return;
+                    }
+                    maxTokens = parsed;
+                }
 
                 const data = {
                     temperature: parseFloat(
@@ -2883,6 +3023,7 @@ Loading...</pre>
                     ),
                     system_prompt_prefix:
                         document.getElementById("tuning-prefix").value,
+                    max_tokens: maxTokens,
                 };
 
                 btn.disabled = true;
@@ -2895,6 +3036,7 @@ Loading...</pre>
                     const result = await resp.json();
                     if (result.status === "ok") {
                         tuningCache[role] = result.tuning;
+                        refreshTuningMeta(role);
                         status.className = "save-status ok";
                         status.textContent = "Saved!";
                     } else {
@@ -2942,6 +3084,8 @@ Loading...</pre>
                 setSlider("tuning-frequency_penalty", d.frequency_penalty);
                 document.getElementById("tuning-prefix").value = "";
                 updatePrefixCount();
+                document.getElementById("tuning-max-tokens").value = "";
+                updateMaxTokensHint();
 
                 const status = document.getElementById("tuning-status");
                 status.className = "save-status ok";

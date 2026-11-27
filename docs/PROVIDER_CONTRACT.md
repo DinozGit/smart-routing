@@ -970,3 +970,337 @@ if (unsavedKey) body.api_key = unsavedKey;
 
 **Порядок:** `api` и `frontend` параллельно — write scope не пересекаются,
 оба опираются на этот контракт.
+
+---
+
+# 🛡️ Спринт 5 — Отказоустойчивость и контроль вывода (A1–A5)
+
+> **Нормативный раздел.** Три агента работают параллельно; write scope не
+> пересекается, но API/UI/тесты должны сходиться в точке.
+>
+> **Решения, принятые без уточнения (можно поменять до старта):**
+> - формат цепочки fallback — **список строк**, строка остаётся валидной (BC);
+> - дефолтный `max_tokens` — **`min(60% контекста, 16384)`**.
+
+---
+
+## A2. `role_fallbacks` как цепочка
+
+### Формат
+
+`routing.json`:
+
+```json
+{
+  "role_fallbacks": {
+    "coordinator": ["routerai::deepseek/deepseek-v4.1-flash-1017", "openrouter::z-ai/glm-5.3-flash"],
+    "worker_default": "routerai::deepseek/deepseek-v4-flash",
+    "worker_img": []
+  }
+}
+```
+
+- **Список** — цепочка в порядке приоритета.
+- **Строка** — BC: эквивалент списка из одного элемента.
+- **Пустой список / `null`** — fallback не настроен → действует правило из `config.yaml` / авто-правило.
+
+### Новая функция
+
+```python
+def get_role_fallback_models(role_name: str) -> list[str]:
+```
+
+Приоритет:
+1. `state.config["role_fallbacks"][role]` — строка → `[s]`; список → `[x for x in lst if isinstance(x, str) and x.strip()]`; иное → `[]`;
+2. если пусто → `fallback_model` из `config.yaml` → `[value]`;
+3. если пусто → авто-правило (`coordinator → worker_default`, `worker_default → coordinator`, `worker_img → worker_default`) → `[default_model другой роли]`;
+4. иначе `[]`.
+
+**BC:** `get_role_fallback_model(role_name)` остаётся и возвращает `models[0] if models else None`
+(его использует `/roles`).
+
+### Построение цепочки (единое для streaming и non-streaming)
+
+```python
+chain = [spec]
+for fb in (get_role_fallback_models(role) if role else []):
+    if fb and fb not in chain:
+        chain.append(fb)
+```
+
+- Дубликаты и совпадение с `spec` отбрасываются, порядок сохраняется.
+- `role == ""` (явная спецификация клиента) → `chain = [spec]`, fallback не применяется (как сейчас).
+
+### Эндпоинты
+
+`GET /roles` — к каждой роли **добавляется** поле:
+```json
+"fallback_models": ["routerai::X", "openrouter::Y"]
+```
+`fallback_model` (строка) остаётся = первый элемент (BC).
+
+`POST /config` — принимает строку или список. Ответ **дополняется**:
+```json
+{ "status": "ok", "config": {...}, "warnings": ["role_fallbacks.coordinator: модель 'openrouter::foo' не найдена в каталоге"] }
+```
+- Предупреждения **не блокируют** сохранение (каталог может быть пуст).
+- Валидировать только `role_fallbacks`; остальной конфиг — без изменений.
+
+---
+
+## A1. Streaming-failover «до первого байта»
+
+### Проблема
+
+Ветка `if is_stream:` уходила напрямую к primary-провайдеру — цепочка fallback
+существовала **только** для non-streaming. Zed/Cline/Cursor работают в streaming
+→ cross-provider failover не срабатывал никогда.
+
+### Семантика (главное правило)
+
+> **Переключение разрешено только пока клиенту не отправлен ни один байт.**
+> После первого отправленного чанка — никакой подмены модели: честная ошибка
+> в SSE.
+
+### Алгоритм
+
+`stream_generator()` обходит `chain` (см. A2), а не одну модель:
+
+```python
+async def stream_generator():
+    sent_any = False          # генератор-уровень: был ли отправлен хоть один чанк
+    for i, chain_spec in enumerate(chain):
+        is_last = i == len(chain) - 1
+        chain_provider, chain_model_id = resolve_model_spec(chain_spec, source="config")
+        # проверки (как в non-streaming): disabled / нет ключа / нет url →
+        #   if is_last: yield error; return
+        #   else: log skip; continue  (переход к следующей записи цепочки)
+        body["model"] = chain_model_id
+        attempt = 0
+        while True:
+            try:
+                async with client.stream(...) as resp:
+                    if resp.status_code != 200:
+                        # прочитать тело, залогировать
+                        if not is_last: break        # → следующая запись цепочки
+                        yield error; return
+                    # 200 → стримим; каждый yield выставляет sent_any = True
+                    ...
+                    log_usage(chain_spec, ...)        # ← именно chain_spec!
+                    return
+            except RETRYABLE_ERRORS as e:
+                attempt += 1
+                if not sent_any and attempt < RETRY_ATTEMPTS:
+                    sleep(backoff); continue          # повтор той же модели
+                if not sent_any and not is_last: break  # → следующая запись
+                yield error; return
+            except Exception as e:
+                if not sent_any and not is_last: break
+                yield error; return
+```
+
+### Требования
+
+- `log_usage()` вызывается с **фактически использованной** спецификацией (`chain_spec`), а не с исходным `spec`.
+- При переходе на следующую запись — лог **INFO**: `⚠️ Stream fallback: {chain_spec} → {chain[i+1]} (HTTP {code})`.
+- Успешный fallback — лог **INFO**: `✅ Stream fallback successful: {chain_spec}`.
+- Если все записи цепочки исчерпаны — в SSE уходит `data: {"error": "..."}` (как сейчас).
+- Заголовки ответа уже отправлены к моменту старта генератора — это неизбежно, менять `StreamingResponse` не нужно.
+- **Не ломать** существующую логику повторов (`RETRY_ATTEMPTS` / `RETRY_BACKOFF`).
+
+---
+
+## A4. `max_tokens` на роль — применяется и редактируется
+
+### Проблема
+
+`capabilities.max_tokens` в `config.yaml` отдавался в `/roles`, но в proxy **не применялся**.
+Cap срабатывал только если **клиент сам** прислал `max_tokens`. Клиент без
+`max_tokens` → провайдер применяет свой дефолт (часто = весь контекст).
+
+### Константа
+
+```python
+DEFAULT_MAX_TOKENS = 16384
+```
+
+### Формула
+
+```python
+context_limit = model_info.context_length if model_info else None
+cap = int(context_limit * 0.6) if context_limit else None
+configured = tuning.get("max_tokens")          # int | None
+
+if configured is not None:
+    effective = min(configured, cap) if cap else configured
+else:
+    effective = min(cap, DEFAULT_MAX_TOKENS) if cap else DEFAULT_MAX_TOKENS
+```
+
+### Применение в `proxy()` (только когда `role` не пустой)
+
+```python
+client_max = body.get("max_tokens")
+if client_max is not None:
+    effective = min(client_max, cap) if cap else client_max
+else:
+    effective = <формула выше>
+body["max_tokens"] = effective
+```
+
+- Клиент прислал **меньше** cap — значение уважается без изменений.
+- Клиент прислал **больше** cap — режем до cap, лог **INFO**:
+  `🛡️ max_tokens: {client_max} → {effective} (role={role}, cap={cap})`.
+- Клиент молчит → подставляем `effective`, лог **DEBUG** (не засорять INFO).
+- Явная спецификация клиента (`role == ""`) — **не трогаем** `max_tokens` (как сейчас).
+
+### `PUT /roles/{name}/tuning`
+
+- В `allowed` **добавляется** `"max_tokens"`.
+- Валидация: `None` → сохранить как `None` (авто); иначе должно быть **целым > 0**, иначе `400` `{"detail": "max_tokens must be a positive integer or null"}`.
+- Значение **не** обрезается при сохранении — обрезка по cap происходит в `proxy()`.
+
+### `GET /roles/{name}/tuning` — ответ дополняется
+
+```json
+{
+  "temperature": 0.5,
+  "top_p": 0.9,
+  "presence_penalty": 0.0,
+  "frequency_penalty": 0.0,
+  "system_prompt_prefix": "...",
+  "max_tokens": null,
+
+  "context_limit": 262144,
+  "max_tokens_cap": 157286,
+  "max_tokens_effective": 16384,
+  "model": "openrouter::google/gemma-4-31b-it:free",
+  "provider": "openrouter",
+  "provider_display_name": "OpenRouter"
+}
+```
+
+| Поле | Смысл |
+|---|---|
+| `context_limit` | `context_length` модели роли из каталога (уже было) |
+| `max_tokens_cap` | `int(context_limit * 0.6)` или `null` |
+| `max_tokens_effective` | что реально будет применено, если клиент молчит |
+| `model` | составная спецификация модели роли |
+| `provider` | имя провайдера модели роли |
+| `provider_display_name` | `display_name` провайдера — **для UI-подписи (фикс бага 2.1)** |
+
+---
+
+## A4b. Баг 2.1 — «RouterAI» в UI вместо реального провайдера
+
+### Проблема
+
+`admin.html:856` — **захардкожено**:
+```html
+<span style="font-size: 11px; color: #8b949e">(auto from RouterAI model limit)</span>
+```
+У роли `worker_img` модель `openrouter::google/gemma-4-31b-it:free`, а подпись
+говорит «RouterAI». Дополнительно `262 144 tokens` — это **`context_length`**
+модели, а не применяемый cap. Подпись врёт дважды.
+
+### Контракт UI (вкладка 🎚️ Fine Tuning)
+
+Заменить строку «Max Tokens Cap» на два блока, заполняемых из
+`GET /roles/{name}/tuning` (поля A4):
+
+```
+🔒 Context:        262 144 tokens  ·  OpenRouter
+🛡️ Max Tokens:     [ 16384 ]       cap: 157 286 (60% of context)
+```
+
+| Элемент | Источник |
+|---|---|
+| `Context: N tokens` | `context_limit` |
+| провайдер в строке Context | `provider_display_name` |
+| `[input]` — редактируемое значение | `max_tokens` (или пусто, если `null`) |
+| placeholder инпута | `max_tokens_effective` |
+| `cap: N (60% of context)` | `max_tokens_cap` |
+
+Правила:
+- Если `max_tokens_cap == null` → строка `Context: unknown`, инпут активен, подсказка `cap: unknown`.
+- Инпут — `type="number"`, `min="1"`; пустое значение → отправляем `max_tokens: null` (авто).
+- Значение больше cap **не блокируем** — бэкенд обрежет, в UI показываем hint `будет обрезано до N`.
+- **Никаких захардкоженных имён провайдеров** в `admin.html` — после правки `grep -c RouterAI admin.html` должно вернуть `0`.
+- Сохранение — через существующий механизм сохранения tuning (`PUT /roles/{name}/tuning`).
+
+---
+
+## A5. Верификация cap для всех провайдеров
+
+Регресс-тесты (в `tests/phase6/`):
+
+| # | Тест | Проверяет |
+|---|---|---|
+| 1 | `test_cap_uses_model_own_provider` | `get_model_info("openrouter::X")` возвращает `context_length` **именно openrouter**, даже если такая же модель есть у routerai с другим контекстом |
+| 2 | `test_max_tokens_cap_60_percent` | `max_tokens_cap == int(context_length * 0.6)` для каждой из трёх провайдеров |
+| 3 | `test_default_max_tokens_is_min_of_cap_and_16384` | `max_tokens_effective == min(cap, 16384)` при `max_tokens: null` |
+| 4 | `test_client_smaller_value_kept` | клиент прислал `max_tokens` меньше cap → уходит как есть |
+| 5 | `test_client_larger_value_capped` | клиент прислал больше cap → в провайдер уходит cap |
+| 6 | `test_no_max_tokens_when_role_empty` | явная спецификация (`role == ""`) → `max_tokens` не добавляется |
+| 7 | `test_fallback_chain_order_and_dedup` | `get_role_fallback_models`: строка → `[s]`, список сохраняет порядок, дубликаты/`spec` отброшены |
+| 8 | `test_stream_failover_before_first_byte` | 5xx до первого чанка → переход на следующую модель цепочки, клиент получает данные второй |
+| 9 | `test_stream_no_failover_after_first_byte` | ошибка **после** первого чанка → ошибка в SSE, **без** переключения (провайдер №2 не вызывался) |
+| 10 | `test_stream_all_fail_yields_error` | вся цепочка упала → в SSE `data: {"error": ...}` |
+
+---
+
+## A1b. Формат ошибки в SSE — совместимость с клиентами
+
+### Проблема (вскрыта на практике)
+
+При 429 от RouterAI клиент Zed упал с ошибкой десериализации:
+
+```
+invalid type: string "Provider error 429", expected struct ResponseStreamError
+```
+
+Код отправлял `data: {"error": "Provider error 429"}` — **строку**. Клиенты
+OpenAI-совместимого API ожидают **объект** в поле `error`.
+
+### Контракт
+
+Все SSE-ошибки в `stream_generator()` (`proxy()`) должны отдаваться в
+OpenAI-совместимом виде:
+
+```
+data: {"error": {"message": "<текст>", "type": "<тип>", "code": <int|null>}}
+```
+
+| Ситуация | `type` | `code` | `message` |
+|---|---|---|---|
+| Провайдер ответил не-200 | `provider_error` | `resp.status_code` | `Provider error {code}` |
+| Исключение / таймаут | `provider_error` | `null` | `{type(e).__name__}: {e}` |
+| Провайдер выключен | `invalid_request_error` | `400` | `Provider '{p}' is disabled` |
+| Нет API-ключа | `invalid_request_error` | `502` | текст `_check_provider_key` |
+| Нет `base_url` | `invalid_request_error` | `502` | текст `_check_provider_url` |
+
+Требования:
+- Заменить **все** `json.dumps({"error": ...})` в `stream_generator()` на объектную форму (5 мест).
+- Строка `yield f'data: {{"error": "Provider error {resp.status_code}"}}\n\n'` — переписать через `json.dumps`, а не f-string (иначе ломается экранирование).
+- `code` для 429 — обязательно `429`, чтобы клиент мог сделать backoff.
+- Логи не меняются.
+
+---
+
+## A6. Матрица write scope спринта 5
+
+| Агент | Write scope | Задачи |
+|---|---|---|
+| `api` | `router.py` | A1, A1b, A2, A4 (сервер) |
+| `frontend` | `admin.html` | A4 (UI), A4b |
+| `tests` | `tests/phase6/` | A5 + тесты A1/A2/A4 |
+
+**Никто не трогает чужие файлы.** `routing.json` в спринте 5 **не меняется**
+(цепочки настраиваются через `POST /config`; UI для них — спринт 6).
+
+> ⚠️ **Строгое правило для всех агентов:** проверка `POST /config` / `PUT /roles/.../tuning`
+> допустима **только** с подменённым `state.config_file` на tmp-путь
+> (`monkeypatch.setattr(router.state, "config_file", tmp_path / "routing.json")`).
+> Прямой вызов `state.save_config()` пишет в **реальный** `routing.json` проекта —
+> так уже были потеряны модели и промпты ролей. После любой ручной проверки —
+> `git --no-optional-locks status --short` должен показывать чистый `routing.json`.

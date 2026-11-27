@@ -17,6 +17,7 @@ SmartRouter — фикстуры для Phase 6 (спринт «Багфикси
 """
 
 import copy
+import json
 import sys
 from pathlib import Path
 
@@ -25,6 +26,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import router
+
+# Боевой routing.json проекта — писать в него из тестов запрещено.
+PROJECT_ROUTING_FILE = Path(__file__).parent.parent.parent / "routing.json"
 
 
 @pytest.fixture(autouse=True)
@@ -44,6 +48,28 @@ def phase6_state_isolation():
     router.state.providers.clear()
     router.state.providers.update(orig_providers)
     router.state.default_provider = orig_default
+
+
+@pytest.fixture(autouse=True)
+def sprint5_config_guard(tmp_path, monkeypatch):
+    """
+    Страховка для тестов, вызывающих save_config() / POST /config / PUT tuning.
+
+    Корневой conftest (isolate_config) уже подменяет state.config_file на tmp,
+    но здесь путь дополнительно переводится на отдельный файл и проверяется,
+    что он не указывает в боевой routing.json. Это гарантирует, что ни один
+    тест фазы 6 не запишет тестовые данные в проектный конфиг.
+    """
+    assert (
+        Path(router.state.config_file).resolve() != PROJECT_ROUTING_FILE.resolve()
+    ), "Тест пишет в боевой routing.json — подмените state.config_file на tmp"
+
+    safe_file = tmp_path / "sprint5_routing.json"
+    safe_file.write_text(
+        json.dumps(router.state.config, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    monkeypatch.setattr(router.state, "config_file", safe_file)
+    yield
 
 
 @pytest.fixture

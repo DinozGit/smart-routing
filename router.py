@@ -73,6 +73,10 @@ logging.getLogger().addHandler(ring_handler)
 # ============================================================
 BLACKLIST = set(cfg.get("api_blacklist", []))
 
+# A4: дефолтный max_tokens для роли, когда клиент его не прислал.
+# Итоговый effective = min(cap, DEFAULT_MAX_TOKENS), где cap = 60% контекста.
+DEFAULT_MAX_TOKENS = 16384
+
 # Строим PRICES из config.yaml
 PRICES = {}
 for model_name, model_cfg in cfg.get("models", {}).items():
@@ -127,27 +131,45 @@ def get_role_default_model(role_name: str) -> str | None:
     return role.get("default_model")
 
 
-def get_role_fallback_model(role_name: str) -> str | None:
+def get_role_fallback_models(role_name: str) -> list[str]:
     """
-    Возвращает fallback-модель для роли.
+    Возвращает цепочку fallback-моделей для роли.
     Приоритет:
-    1. role_fallbacks из runtime-конфига (routing.json)
-    2. fallback_model из config.yaml
+    1. role_fallbacks из runtime-конфига (routing.json):
+       строка → [s]; список → отфильтрованный список строк; иное → []
+    2. fallback_model из config.yaml → [value]
     3. Автоматическое правило:
       coordinator    -> worker_default.default_model
       worker_default -> coordinator.default_model
       worker_img     -> worker_default.default_model
+    4. []
     """
     # 1. role_fallbacks из routing.json
     role_fallbacks = state.config.get("role_fallbacks", {})
     if role_name in role_fallbacks:
-        return role_fallbacks[role_name]
+        value = role_fallbacks[role_name]
+        if isinstance(value, str):
+            if value.strip():
+                return [value]
+        elif isinstance(value, list):
+            filtered = [
+                x for x in value if isinstance(x, str) and x.strip()
+            ]
+            if filtered:
+                # Дедуп с сохранением порядка (цепочка без повторов)
+                seen = set()
+                deduped = []
+                for x in filtered:
+                    if x not in seen:
+                        seen.add(x)
+                        deduped.append(x)
+                return deduped
 
     # 2. fallback_model из config.yaml
     role = get_role_config(role_name)
     explicit = role.get("fallback_model")
     if explicit:
-        return explicit
+        return [explicit]
 
     # 3. Автоматическое правило
     auto_map = {
@@ -157,8 +179,44 @@ def get_role_fallback_model(role_name: str) -> str | None:
     }
     fallback_role = auto_map.get(role_name)
     if fallback_role:
-        return get_role_default_model(fallback_role)
-    return None
+        model = get_role_default_model(fallback_role)
+        if model:
+            return [model]
+    return []
+
+
+def get_role_fallback_model(role_name: str) -> str | None:
+    """BC-обёртка: первая модель цепочки fallback или None."""
+    models = get_role_fallback_models(role_name)
+    return models[0] if models else None
+
+
+def _build_fallback_chain(spec: str, role: str) -> list[str]:
+    """
+    Строит цепочку [spec] + fallback'и роли (единое для streaming/non-streaming).
+    Дубликаты и совпадение с spec отбрасываются, порядок сохраняется.
+    При role == "" → только [spec] (fallback не применяется).
+    """
+    chain = [spec]
+    for fb in (get_role_fallback_models(role) if role else []):
+        if fb and fb not in chain:
+            chain.append(fb)
+    return chain
+
+
+def _model_in_catalog(spec: str) -> bool:
+    """Проверяет наличие модели (составной или голой) в каталоге."""
+    if "::" in spec:
+        prov, mid = spec.split("::", 1)
+        if f"{prov}::{mid}" in state.available_models:
+            return True
+        return mid in state.models_by_provider.get(prov, [])
+    if spec in state.available_models:
+        return True
+    for ids in state.models_by_provider.values():
+        if spec in ids:
+            return True
+    return False
 
 
 def _split_config_model_key(key: str) -> tuple[str | None, str]:
@@ -865,6 +923,18 @@ def sanitize_ascii(value: str) -> str:
     return re.sub(r"[^\x00-\x7F]+", "", str(value))
 
 
+def _sse_error(message: str, err_type: str, code: int | None) -> str:
+    """
+    A1b: OpenAI-совместимая SSE-ошибка (объект, а не строка).
+
+    data: {"error": {"message": ..., "type": ..., "code": ...}}
+
+    Клиенты (Zed/Cline/Cursor) ждут struct ResponseStreamError, а не строку.
+    """
+    payload = {"error": {"message": message, "type": err_type, "code": code}}
+    return "data: " + json.dumps(payload) + "\n\n"
+
+
 def _to_base_factor(currency: str) -> float:
     """
     Сколько единиц базовой валюты стоит 1 единица `currency`.
@@ -1521,6 +1591,7 @@ async def get_roles():
             "description": role_cfg.get("description", ""),
             "default_model": role_cfg.get("default_model", ""),
             "fallback_model": get_role_fallback_model(role_name) or "",
+            "fallback_models": get_role_fallback_models(role_name),
             "agents": role_cfg.get("agents", []),
             "capabilities": role_cfg.get("capabilities", {}),
             "context_limit": context_limit,
@@ -1536,20 +1607,50 @@ async def get_roles_tuning():
 
 @app.get("/roles/{name}/tuning")
 async def get_role_tuning(name: str):
-    """Возвращает tuning-конфиг для конкретной роли."""
+    """Возвращает tuning-конфиг для конкретной роли (+ A4 поля)."""
     tuning = state.config.get("role_tuning", {})
     if name not in tuning:
         raise HTTPException(
             status_code=404, detail=f"Role '{name}' not found in tuning"
         )
-    # Добавляем context_limit из models_cache
-    role_model = get_role_default_model(name)
+
     result = dict(tuning[name])
     result["context_limit"] = None
+    result["max_tokens_cap"] = None
+    result["max_tokens_effective"] = DEFAULT_MAX_TOKENS
+    result["model"] = None
+    result["provider"] = None
+    result["provider_display_name"] = None
+
+    # Составная спецификация модели роли + провайдер
+    role_model = get_role_default_model(name)
     if role_model:
-        info = state.get_model_info(role_model)
+        spec = _normalize_to_composite(role_model, source="config")
+        result["model"] = spec
+        prov, _ = resolve_model_spec(spec, source="config")
+        result["provider"] = prov
+        p_cfg = state.providers.get(prov, {})
+        result["provider_display_name"] = p_cfg.get("display_name", prov)
+
+        info = state.get_model_info(spec)
         if info:
-            result["context_limit"] = info.get("context_length")
+            context_limit = info.get("context_length")
+            result["context_limit"] = context_limit
+            if context_limit:
+                result["max_tokens_cap"] = int(context_limit * 0.6)
+
+    # max_tokens_effective — что реально применится, если клиент молчит
+    cap = result["max_tokens_cap"]
+    configured = result.get("max_tokens")
+    if configured is not None:
+        result["max_tokens_effective"] = (
+            min(configured, cap) if cap else configured
+        )
+    else:
+        result["max_tokens_effective"] = (
+            min(cap, DEFAULT_MAX_TOKENS) if cap else DEFAULT_MAX_TOKENS
+        )
+
     return result
 
 
@@ -1574,7 +1675,20 @@ async def update_role_tuning(name: str, request: Request):
         "presence_penalty",
         "frequency_penalty",
         "system_prompt_prefix",
+        "max_tokens",
     }
+
+    # A4: max_tokens — None (авто) или целое > 0. Не обрезаем по cap при сохранении.
+    if "max_tokens" in data:
+        mt = data["max_tokens"]
+        if mt is not None and (
+            not isinstance(mt, int) or isinstance(mt, bool) or mt <= 0
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="max_tokens must be a positive integer or null",
+            )
+
     for key in allowed:
         if key in data:
             tuning[name][key] = data[key]
@@ -1589,8 +1703,33 @@ async def update_role_tuning(name: str, request: Request):
 async def update_config(request: Request):
     try:
         new_config = await request.json()
+
+        # A2: валидация role_fallbacks — только предупреждения, без блокировки.
+        warnings: list[str] = []
+        role_fallbacks = (
+            new_config.get("role_fallbacks")
+            if isinstance(new_config, dict)
+            else None
+        )
+        if isinstance(role_fallbacks, dict):
+            for role, value in role_fallbacks.items():
+                if isinstance(value, str):
+                    models = [value] if value.strip() else []
+                elif isinstance(value, list):
+                    models = [
+                        x for x in value if isinstance(x, str) and x.strip()
+                    ]
+                else:
+                    models = []
+                for m in models:
+                    if not _model_in_catalog(m):
+                        warnings.append(
+                            f"role_fallbacks.{role}: модель '{m}' "
+                            f"не найдена в каталоге"
+                        )
+
         await state.save_config(new_config)
-        return {"status": "ok", "config": state.config}
+        return {"status": "ok", "config": state.config, "warnings": warnings}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1978,20 +2117,29 @@ async def proxy(request: Request):
             if param not in body and tuning.get(param) is not None:
                 body[param] = tuning[param]
 
-        # 2. Auto max_tokens cap — динамический, из context_length модели
+        # 2. max_tokens на роль (A4): применяется всегда при непустом role
         model_info = state.get_model_info(spec)
-        if model_info:
-            context_limit = model_info.get("context_length", 0)
-            client_max = body.get("max_tokens", 0)
-            if context_limit > 0 and client_max:
-                max_allowed = int(context_limit * 0.6)
-                capped = min(client_max, max(max_allowed, 4096))
-                if capped < client_max:
-                    logger.info(
-                        f"\U0001f6e1\ufe0f Capped max_tokens {client_max} \u2192 {capped} "
-                        f"({spec}: 60% of {context_limit})"
-                    )
-                    body["max_tokens"] = capped
+        context_limit = model_info.get("context_length") if model_info else None
+        cap = int(context_limit * 0.6) if context_limit else None
+        configured = tuning.get("max_tokens")
+        if configured is not None:
+            effective = min(configured, cap) if cap else configured
+        else:
+            effective = min(cap, DEFAULT_MAX_TOKENS) if cap else DEFAULT_MAX_TOKENS
+
+        client_max = body.get("max_tokens")
+        if client_max is not None:
+            effective = min(client_max, cap) if cap else client_max
+            if cap is not None and client_max > cap:
+                logger.info(
+                    f"\U0001f6e1\ufe0f max_tokens: {client_max} \u2192 {effective} "
+                    f"(role={role}, cap={cap})"
+                )
+        else:
+            logger.debug(
+                f"\U0001f6e1\ufe0f max_tokens: {effective} (role={role}, cap={cap})"
+            )
+        body["max_tokens"] = effective
 
         # 3. System prompt prefix
         prefix = tuning.get("system_prompt_prefix", "")
@@ -2037,97 +2185,163 @@ async def proxy(request: Request):
 
     is_stream = body.get("stream", False)
 
+    # A2: единая цепочка для streaming и non-streaming
+    chain = _build_fallback_chain(spec, role)
+
     if is_stream:
-        # Streaming — fallback невозможен, используем primary provider
-        key_error = _check_provider_key(provider)
-        if key_error:
-            raise HTTPException(status_code=502, detail=key_error)
-        url_error = _check_provider_url(provider)
-        if url_error:
-            raise HTTPException(status_code=502, detail=url_error)
-
-        target_url = state.get_provider_url(provider)
-        headers = _build_provider_headers(provider)
-        client = get_provider_client(provider)
-
         async def stream_generator():
-            attempt = 0
+            # sent_any — генератор-уровень: был ли отправлен хоть один чанк.
+            # Пока False — разрешён переход к следующей записи цепочки.
             sent_any = False
-            while True:
-                try:
-                    async with client.stream(
-                        "POST", target_url, json=body, headers=headers
-                    ) as resp:
-                        if resp.status_code != 200:
-                            error_text = await resp.aread()
-                            logger.error(
-                                f"Провайдер вернул {resp.status_code}: "
-                                f"{error_text.decode('utf-8', errors='ignore')} \u2192 {target_url}"
-                            )
-                            yield f'data: {{"error": "Provider error {resp.status_code}"}}\n\n'
-                            return
+            for i, chain_spec in enumerate(chain):
+                is_last = i == len(chain) - 1
+                chain_provider, chain_model_id = resolve_model_spec(
+                    chain_spec, source="config"
+                )
 
-                        usage_found = False
-                        async for chunk in resp.aiter_lines():
-                            if chunk.startswith("data: "):
-                                try:
-                                    data = json.loads(chunk[6:])
-                                    if "usage" in data and data["usage"]:
-                                        usage = data["usage"]
-                                        log_usage(
-                                            spec,
-                                            usage.get("prompt_tokens", 0),
-                                            usage.get("completion_tokens", 0),
-                                        )
-                                        usage_found = True
-                                except json.JSONDecodeError:
-                                    pass
-
-                            if chunk:
-                                sent_any = True
-                                yield chunk + "\n\n"
-
-                        if not usage_found:
-                            log_usage(spec, 0, 0)
-                        return
-                except RETRYABLE_ERRORS as e:
-                    attempt += 1
-                    if not sent_any and attempt < RETRY_ATTEMPTS:
-                        delay = RETRY_BACKOFF * (2 ** (attempt - 1))
-                        logger.warning(
-                            f"\U0001f504 Streaming: \u043f\u043e\u0432\u0442\u043e\u0440 {attempt}/{RETRY_ATTEMPTS} \u0447\u0435\u0440\u0435\u0437 "
-                            f"{delay:.1f}s \u2014 {type(e).__name__}: {e} \u2192 {target_url}"
+                # Проверки (как в non-streaming)
+                key_error = _check_provider_key(chain_provider)
+                if key_error:
+                    if is_last:
+                        yield _sse_error(
+                            key_error, "invalid_request_error", 502
                         )
-                        await asyncio.sleep(delay)
-                        continue
-                    logger.error(
-                        f"\u041e\u0448\u0438\u0431\u043a\u0430 streaming ({type(e).__name__}): {e} \u2192 {target_url}"
+                        return
+                    logger.warning(
+                        f"\u26a0\ufe0f Stream fallback skip (no key): {chain_spec}"
                     )
-                    yield (
-                        "data: "
-                        + json.dumps({"error": f"{type(e).__name__}: {e}"})
-                        + "\n\n"
+                    continue
+
+                if not state.is_provider_enabled(chain_provider):
+                    if is_last:
+                        yield _sse_error(
+                            f"Provider '{chain_provider}' is disabled",
+                            "invalid_request_error",
+                            400,
+                        )
+                        return
+                    logger.warning(
+                        f"\u26a0\ufe0f Stream fallback skip (provider disabled): {chain_spec}"
                     )
-                    return
-                except Exception as e:
-                    logger.error(
-                        f"\u041e\u0448\u0438\u0431\u043a\u0430 streaming ({type(e).__name__}): {e} \u2192 {target_url}"
+                    continue
+
+                url_error = _check_provider_url(chain_provider)
+                if url_error:
+                    if is_last:
+                        yield _sse_error(
+                            url_error, "invalid_request_error", 502
+                        )
+                        return
+                    logger.warning(
+                        f"\u26a0\ufe0f Stream fallback skip (no url): {chain_spec}"
                     )
-                    yield (
-                        "data: "
-                        + json.dumps({"error": f"{type(e).__name__}: {e}"})
-                        + "\n\n"
-                    )
-                    return
+                    continue
+
+                target_url = state.get_provider_url(chain_provider)
+                headers = _build_provider_headers(chain_provider)
+                client = get_provider_client(chain_provider)
+                body["model"] = chain_model_id
+
+                attempt = 0
+                while True:
+                    try:
+                        async with client.stream(
+                            "POST", target_url, json=body, headers=headers
+                        ) as resp:
+                            if resp.status_code != 200:
+                                error_text = await resp.aread()
+                                logger.error(
+                                    f"Провайдер вернул {resp.status_code}: "
+                                    f"{error_text.decode('utf-8', errors='ignore')} \u2192 {target_url}"
+                                )
+                                # До первого байта можно перейти к следующей записи
+                                if not sent_any and not is_last:
+                                    logger.info(
+                                        f"\u26a0\ufe0f Stream fallback: {chain_spec} "
+                                        f"\u2192 {chain[i + 1]} (HTTP {resp.status_code})"
+                                    )
+                                    break
+                                yield _sse_error(
+                                    f"Provider error {resp.status_code}",
+                                    "provider_error",
+                                    resp.status_code,
+                                )
+                                return
+
+                            usage_found = False
+                            async for chunk in resp.aiter_lines():
+                                if chunk.startswith("data: "):
+                                    try:
+                                        data = json.loads(chunk[6:])
+                                        if "usage" in data and data["usage"]:
+                                            usage = data["usage"]
+                                            log_usage(
+                                                chain_spec,
+                                                usage.get("prompt_tokens", 0),
+                                                usage.get("completion_tokens", 0),
+                                            )
+                                            usage_found = True
+                                    except json.JSONDecodeError:
+                                        pass
+
+                                if chunk:
+                                    sent_any = True
+                                    yield chunk + "\n\n"
+
+                            if not usage_found:
+                                log_usage(chain_spec, 0, 0)
+                            if i > 0:
+                                logger.info(
+                                    f"\u2705 Stream fallback successful: {chain_spec}"
+                                )
+                            return
+                    except RETRYABLE_ERRORS as e:
+                        attempt += 1
+                        if not sent_any and attempt < RETRY_ATTEMPTS:
+                            delay = RETRY_BACKOFF * (2 ** (attempt - 1))
+                            logger.warning(
+                                f"\U0001f504 Streaming: \u043f\u043e\u0432\u0442\u043e\u0440 {attempt}/{RETRY_ATTEMPTS} \u0447\u0435\u0440\u0435\u0437 "
+                                f"{delay:.1f}s \u2014 {type(e).__name__}: {e} \u2192 {target_url}"
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        # Повторы исчерпаны
+                        if not sent_any and not is_last:
+                            logger.info(
+                                f"\u26a0\ufe0f Stream fallback: {chain_spec} "
+                                f"\u2192 {chain[i + 1]} ({type(e).__name__})"
+                            )
+                            break
+                        logger.error(
+                            f"\u041e\u0448\u0438\u0431\u043a\u0430 streaming ({type(e).__name__}): {e} \u2192 {target_url}"
+                        )
+                        yield _sse_error(
+                            f"{type(e).__name__}: {e}",
+                            "provider_error",
+                            None,
+                        )
+                        return
+                    except Exception as e:
+                        # До первого байта — переходим к следующей записи
+                        if not sent_any and not is_last:
+                            logger.info(
+                                f"\u26a0\ufe0f Stream fallback: {chain_spec} "
+                                f"\u2192 {chain[i + 1]} ({type(e).__name__})"
+                            )
+                            break
+                        logger.error(
+                            f"\u041e\u0448\u0438\u0431\u043a\u0430 streaming ({type(e).__name__}): {e} \u2192 {target_url}"
+                        )
+                        yield _sse_error(
+                            f"{type(e).__name__}: {e}",
+                            "provider_error",
+                            None,
+                        )
+                        return
 
         return StreamingResponse(stream_generator(), media_type="text/event-stream")
     else:
-        # Non-streaming with fallback chain (per-provider)
-        fallback_spec = get_role_fallback_model(role) if role else None
-        chain = [spec]
-        if fallback_spec and fallback_spec != spec:
-            chain.append(fallback_spec)
-
+        # Non-streaming with fallback chain (per-provider); chain построен выше (A2)
         last_error: Exception | None = None
         for i, chain_spec in enumerate(chain):
             is_last = i == len(chain) - 1

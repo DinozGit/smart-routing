@@ -169,8 +169,10 @@ class TestTuningCapsMaxTokens:
 
         call_kwargs = mock_proxy_post.call_args[1]
         sent_body = call_kwargs["json"]
-        # context_length=4096 (mock), max_allowed=60%=2457, min=4096 → 4096 < 99999 → cap до 4096
-        assert sent_body["max_tokens"] == 4096
+        # Sprint 5 A4: cap = int(context_length * 0.6) = int(4096*0.6) = 2457;
+        # клиент прислал 99999 > cap → в провайдер уходит cap (2457).
+        # (Старая формула min(client, max(cap, 4096)) заменена контрактом A4.)
+        assert sent_body["max_tokens"] == 2457
 
     async def test_tuning_does_not_cap_when_below_limit(self, client, mock_proxy_post):
         """Если max_tokens в пределах — не трогаем."""
